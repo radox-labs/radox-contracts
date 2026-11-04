@@ -1,0 +1,37 @@
+[package]
+name = "maturity-settlement"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = "25.3.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "25.3.0", features = ["testutils"] }
+
+# Network feature gates (F-006 audit — canonical USDC SAC hardcoded per network).
+# Default is `testing` so `cargo test` works out of the box. WASM builds MUST
+# pass `--no-default-features --features testnet` or `--features mainnet`.
+[features]
+default = ["testing"]
+testnet = []
+mainnet = []
+testing = []  # disables USDC SAC validation for unit tests
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

@@ -1,0 +1,2510 @@
+#![cfg(test)]
+
+use soroban_sdk::testutils::{storage::Persistent as _, Address as _, Ledger};
+use soroban_sdk::{BytesN, token, Address, Env};
+
+use crate::{DataKey, Offer, SaleError, TokenSale, TokenSaleClient};
+
+fn create_token_contract<'a>(
+    e: &Env,
+    admin: &Address,
+) -> (token::Client<'a>, token::StellarAssetClient<'a>) {
+    let sac = e.register_stellar_asset_contract_v2(admin.clone());
+    (
+        token::Client::new(e, &sac.address()),
+        token::StellarAssetClient::new(e, &sac.address()),
+    )
+}
+
+/// Standard setup: admin == seller, fixed_fee=0 (no fee, all to company), no deadline, no min, no cap.
+fn setup_sale<'a>(
+    e: &Env,
+) -> (
+    TokenSaleClient<'a>,
+    Address,                       // admin (== seller)
+    Address,                       // buyer
+    Address,                       // treasury
+    token::Client<'a>,             // sell_token
+    token::StellarAssetClient<'a>, // sell_token_admin
+    token::Client<'a>,             // buy_token
+    token::StellarAssetClient<'a>, // buy_token_admin
+    Address,                       // sale_id
+) {
+    let admin = Address::generate(e);
+    let buyer = Address::generate(e);
+    let treasury = Address::generate(e);
+    let company = Address::generate(e);
+
+    let (sell_token, sell_token_admin) = create_token_contract(e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(e, &buyer);
+
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(e, &sale_id);
+
+    sale.create(
+        &admin, &admin,
+        &sell_token.address, &buy_token.address, &treasury,
+        &company, &0i128,  // fixed_fee=0: no fee, all to company
+        &1, &1,
+        &0, &0, &0, // no deadline, no min, no cap
+        &0, &0, // v8: MODE_DIRECT — the v7 pass-through path
+    );
+
+    let supply: i128 = 1_000 * 10_000_000;
+    sell_token_admin.mint(&admin, &supply);
+    buy_token_admin.mint(&buyer, &(500 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &supply);
+    sale.set_active(&true);
+
+    (sale, admin, buyer, treasury, sell_token, sell_token_admin, buy_token, buy_token_admin, sale_id)
+}
+
+// ═══════════════════════════════════════════════════════
+//  1. create() — 7 tests
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_create_happy_path() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let seller = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let treasury = Address::generate(&e);
+
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    sale.create(&admin, &seller, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &1000, &(10*10_000_000), &(100*10_000_000), &0, &0);
+
+    let offer = sale.get_offer();
+    assert_eq!(offer.admin, admin);
+    assert_eq!(offer.seller, seller);
+    assert_eq!(offer.is_active, false);
+    assert_eq!(offer.deadline_ledger, 1000);
+    assert_eq!(offer.min_buy_amount, 10 * 10_000_000);
+    assert_eq!(offer.max_buy_per_buyer, 100 * 10_000_000);
+}
+
+#[test]
+fn test_create_double_create_fails() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let treasury = Address::generate(&e);
+
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &0, &0, &0, &0, &0);
+    let result = sale.try_create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &0, &0, &0, &0, &0);
+    assert_eq!(result, Err(Ok(SaleError::AlreadyCreated)));
+}
+
+#[test]
+fn test_create_zero_sell_price() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    let result = sale.try_create(&admin, &admin, &sell_token.address, &buy_token.address, &Address::generate(&e), &Address::generate(&e), &0i128, &0, &1, &0, &0, &0, &0, &0);
+    assert_eq!(result, Err(Ok(SaleError::ZeroPrice)));
+}
+
+#[test]
+fn test_create_zero_buy_price() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    let result = sale.try_create(&admin, &admin, &sell_token.address, &buy_token.address, &Address::generate(&e), &Address::generate(&e), &0i128, &1, &0, &0, &0, &0, &0, &0);
+    assert_eq!(result, Err(Ok(SaleError::ZeroPrice)));
+}
+
+#[test]
+fn test_create_both_prices_zero() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    let result = sale.try_create(&admin, &admin, &sell_token.address, &buy_token.address, &Address::generate(&e), &Address::generate(&e), &0i128, &0, &0, &0, &0, &0, &0, &0);
+    assert_eq!(result, Err(Ok(SaleError::ZeroPrice)));
+}
+
+#[test]
+fn test_create_max_u32_prices() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &Address::generate(&e), &Address::generate(&e), &0i128, &u32::MAX, &u32::MAX, &0, &0, &0, &0, &0);
+    let offer = sale.get_offer();
+    assert_eq!(offer.sell_price, u32::MAX);
+    assert_eq!(offer.buy_price, u32::MAX);
+}
+
+#[test]
+fn test_create_with_compliance_fields() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    // deadline=500, min=1000 stroops, cap=5000 stroops
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &Address::generate(&e), &Address::generate(&e), &0i128, &1, &1, &500, &1000, &5000, &0, &0);
+    let offer = sale.get_offer();
+    assert_eq!(offer.deadline_ledger, 500);
+    assert_eq!(offer.min_buy_amount, 1000);
+    assert_eq!(offer.max_buy_per_buyer, 5000);
+}
+
+// ═══════════════════════════════════════════════════════
+//  2. trade() — CORE (14 tests)
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_trade_happy_1_to_1() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, treasury, sell_token, _, buy_token, _, sale_id) = setup_sale(&e);
+    let amount: i128 = 100 * 10_000_000;
+    sale.trade(&buyer, &amount);
+    assert_eq!(sell_token.balance(&buyer), amount);
+    // fixed_fee=0: company gets all USDC, treasury gets 0
+    assert_eq!(buy_token.balance(&treasury), 0);
+    assert_eq!(sell_token.balance(&sale_id), 1_000 * 10_000_000 - amount);
+}
+
+#[test]
+fn test_trade_minimum_1_stroop() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, treasury, sell_token, _, buy_token, _, _) = setup_sale(&e);
+    sale.trade(&buyer, &1i128);
+    assert_eq!(sell_token.balance(&buyer), 1);
+    // fixed_fee=0: company gets 1 stroop, treasury 0
+    assert_eq!(buy_token.balance(&treasury), 0);
+}
+
+#[test]
+fn test_trade_exact_exhaustion() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &buyer);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &0, &0, &0, &0, &0);
+    let supply: i128 = 100 * 10_000_000;
+    sell_token_admin.mint(&admin, &supply);
+    sell_token.transfer(&admin, &sale_id, &supply);
+    buy_token_admin.mint(&buyer, &supply);
+    sale.set_active(&true);
+    sale.trade(&buyer, &supply);
+    assert_eq!(sell_token.balance(&sale_id), 0);
+    assert_eq!(sell_token.balance(&buyer), supply);
+}
+
+#[test]
+fn test_trade_multiple_buyers() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let buyer_a = Address::generate(&e);
+    let buyer_b = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &0, &0, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(200 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(200 * 10_000_000i128));
+    buy_token_admin.mint(&buyer_a, &(100 * 10_000_000i128));
+    buy_token_admin.mint(&buyer_b, &(100 * 10_000_000i128));
+    sale.set_active(&true);
+    sale.trade(&buyer_a, &(100 * 10_000_000i128));
+    sale.trade(&buyer_b, &(100 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer_a), 100 * 10_000_000);
+    assert_eq!(sell_token.balance(&buyer_b), 100 * 10_000_000);
+    assert_eq!(sell_token.balance(&sale_id), 0);
+}
+
+#[test]
+fn test_trade_non_1to1_pricing() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &3, &2, &0, &0, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    buy_token_admin.mint(&buyer, &(100 * 10_000_000i128));
+    sale.set_active(&true);
+    sale.trade(&buyer, &(100 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer), 150 * 10_000_000); // 100 * 3/2
+}
+
+#[test]
+fn test_trade_rounding_truncation() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &3, &0, &0, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    buy_token_admin.mint(&buyer, &(100 * 10_000_000i128));
+    sale.set_active(&true);
+
+    sale.trade(&buyer, &10i128);
+    assert_eq!(sell_token.balance(&buyer), 3); // 10/3 = 3.33 → 3
+
+    let result = sale.try_trade(&buyer, &1i128);
+    assert_eq!(result, Err(Ok(SaleError::TradeTooSmall))); // 1/3 → 0
+
+    let result = sale.try_trade(&buyer, &2i128);
+    assert_eq!(result, Err(Ok(SaleError::TradeTooSmall))); // 2/3 → 0
+
+    sale.trade(&buyer, &3i128);
+    assert_eq!(sell_token.balance(&buyer), 4); // 3/3 → 1
+}
+
+#[test]
+fn test_trade_zero_amount() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_sale(&e);
+    assert_eq!(sale.try_trade(&buyer, &0), Err(Ok(SaleError::InvalidAmount)));
+}
+
+#[test]
+fn test_trade_negative_amount() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_sale(&e);
+    assert_eq!(sale.try_trade(&buyer, &-1), Err(Ok(SaleError::InvalidAmount)));
+}
+
+#[test]
+fn test_trade_i128_min() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_sale(&e);
+    assert_eq!(sale.try_trade(&buyer, &i128::MIN), Err(Ok(SaleError::InvalidAmount)));
+}
+
+#[test]
+fn test_trade_while_paused() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_sale(&e);
+    sale.set_active(&false);
+    assert_eq!(sale.try_trade(&buyer, &(100 * 10_000_000i128)), Err(Ok(SaleError::NotActive)));
+}
+
+#[test]
+fn test_trade_before_activation() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &buyer);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &Address::generate(&e), &Address::generate(&e), &0i128, &1, &1, &0, &0, &0, &0, &0);
+    assert_eq!(sale.try_trade(&buyer, &(10 * 10_000_000i128)), Err(Ok(SaleError::NotActive)));
+}
+
+#[test]
+#[should_panic]
+fn test_trade_exceeds_buyer_balance() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_sale(&e);
+    sale.trade(&buyer, &(600 * 10_000_000i128));
+}
+
+#[test]
+#[should_panic]
+fn test_trade_exceeds_contract_supply() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &Address::generate(&e), &Address::generate(&e), &0i128, &1, &1, &0, &0, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(5 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(5 * 10_000_000i128));
+    buy_token_admin.mint(&buyer, &(100 * 10_000_000i128));
+    sale.set_active(&true);
+    sale.trade(&buyer, &(50 * 10_000_000i128));
+}
+
+#[test]
+fn test_trade_repeated_same_buyer() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, treasury, sell_token, _, buy_token, _, sale_id) = setup_sale(&e);
+    for _ in 0..10 {
+        sale.trade(&buyer, &(50 * 10_000_000i128));
+    }
+    assert_eq!(sell_token.balance(&buyer), 500 * 10_000_000);
+    // fixed_fee=0: treasury gets nothing
+    assert_eq!(buy_token.balance(&treasury), 0);
+    assert_eq!(sell_token.balance(&sale_id), 500 * 10_000_000);
+}
+
+// ═══════════════════════════════════════════════════════
+//  3. DEADLINE — 4 tests
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_deadline_trade_before_deadline() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    // Deadline at ledger 1000
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &1000, &0, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(100 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(100 * 10_000_000i128));
+    buy_token_admin.mint(&buyer, &(100 * 10_000_000i128));
+    sale.set_active(&true);
+
+    // Ledger 500 — before deadline
+    e.ledger().with_mut(|li| li.sequence_number = 500);
+    sale.trade(&buyer, &(10 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer), 10 * 10_000_000);
+}
+
+#[test]
+fn test_deadline_trade_at_exact_deadline() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &1000, &0, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(100 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(100 * 10_000_000i128));
+    buy_token_admin.mint(&buyer, &(100 * 10_000_000i128));
+    sale.set_active(&true);
+
+    // Ledger 1000 — exactly at deadline → still OK
+    e.ledger().with_mut(|li| li.sequence_number = 1000);
+    sale.trade(&buyer, &(10 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer), 10 * 10_000_000);
+}
+
+#[test]
+fn test_deadline_trade_after_deadline() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &buyer);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &Address::generate(&e), &Address::generate(&e), &0i128, &1, &1, &1000, &0, &0, &0, &0);
+    sale.set_active(&true);
+
+    // Ledger 1001 — AFTER deadline → Expired
+    e.ledger().with_mut(|li| li.sequence_number = 1001);
+    let result = sale.try_trade(&buyer, &(10 * 10_000_000i128));
+    assert_eq!(result, Err(Ok(SaleError::Expired)));
+}
+
+#[test]
+fn test_deadline_zero_means_no_deadline() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, _, sell_token, _, _, _, _) = setup_sale(&e);
+
+    // Set ledger far into the future — should still work (deadline=0)
+    e.ledger().with_mut(|li| li.sequence_number = 999_999_999);
+    sale.trade(&buyer, &(10 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer), 10 * 10_000_000);
+}
+
+// ═══════════════════════════════════════════════════════
+//  4. MIN INVESTMENT — 3 tests
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_min_investment_above_minimum() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    let min: i128 = 100 * 10_000_000; // min 100 USDC
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &0, &min, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    buy_token_admin.mint(&buyer, &(500 * 10_000_000i128));
+    sale.set_active(&true);
+
+    // 200 USDC ≥ 100 min → OK
+    sale.trade(&buyer, &(200 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer), 200 * 10_000_000);
+}
+
+#[test]
+fn test_min_investment_exact_minimum() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    let min: i128 = 100 * 10_000_000;
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &0, &min, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    buy_token_admin.mint(&buyer, &(500 * 10_000_000i128));
+    sale.set_active(&true);
+
+    // Exactly 100 USDC → OK
+    sale.trade(&buyer, &min);
+    assert_eq!(sell_token.balance(&buyer), 100 * 10_000_000);
+}
+
+#[test]
+fn test_min_investment_below_minimum() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &buyer);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    let min: i128 = 100 * 10_000_000;
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &Address::generate(&e), &Address::generate(&e), &0i128, &1, &1, &0, &min, &0, &0, &0);
+    sale.set_active(&true);
+
+    // 50 USDC < 100 min → BelowMinimum
+    let result = sale.try_trade(&buyer, &(50 * 10_000_000i128));
+    assert_eq!(result, Err(Ok(SaleError::BelowMinimum)));
+}
+
+// ═══════════════════════════════════════════════════════
+//  5. PER-BUYER CAP — 5 tests
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_buyer_cap_within_limit() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    let cap: i128 = 200 * 10_000_000;
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &0, &0, &cap, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    buy_token_admin.mint(&buyer, &(500 * 10_000_000i128));
+    sale.set_active(&true);
+
+    sale.trade(&buyer, &(100 * 10_000_000i128));
+    assert_eq!(sale.get_buyer_spent(&buyer), 100 * 10_000_000);
+
+    sale.trade(&buyer, &(100 * 10_000_000i128));
+    assert_eq!(sale.get_buyer_spent(&buyer), 200 * 10_000_000);
+}
+
+#[test]
+fn test_buyer_cap_exceeded() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    let cap: i128 = 100 * 10_000_000;
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &0, &0, &cap, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    buy_token_admin.mint(&buyer, &(500 * 10_000_000i128));
+    sale.set_active(&true);
+
+    sale.trade(&buyer, &(80 * 10_000_000i128));
+
+    // 80 + 50 = 130 > 100 cap → BuyerCapExceeded
+    let result = sale.try_trade(&buyer, &(50 * 10_000_000i128));
+    assert_eq!(result, Err(Ok(SaleError::BuyerCapExceeded)));
+}
+
+#[test]
+fn test_buyer_cap_exact_limit() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    let cap: i128 = 100 * 10_000_000;
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &0, &0, &cap, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    buy_token_admin.mint(&buyer, &(500 * 10_000_000i128));
+    sale.set_active(&true);
+
+    // Exactly at cap → OK
+    sale.trade(&buyer, &cap);
+    assert_eq!(sale.get_buyer_spent(&buyer), cap);
+
+    // 1 stroop over → BuyerCapExceeded
+    let result = sale.try_trade(&buyer, &1);
+    assert_eq!(result, Err(Ok(SaleError::BuyerCapExceeded)));
+}
+
+#[test]
+fn test_buyer_cap_independent_per_buyer() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer_a = Address::generate(&e);
+    let buyer_b = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    let cap: i128 = 100 * 10_000_000;
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &0, &0, &cap, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    buy_token_admin.mint(&buyer_a, &(200 * 10_000_000i128));
+    buy_token_admin.mint(&buyer_b, &(200 * 10_000_000i128));
+    sale.set_active(&true);
+
+    // A uses full cap
+    sale.trade(&buyer_a, &cap);
+    let result = sale.try_trade(&buyer_a, &1);
+    assert_eq!(result, Err(Ok(SaleError::BuyerCapExceeded)));
+
+    // B is independent — full cap available
+    sale.trade(&buyer_b, &cap);
+    assert_eq!(sale.get_buyer_spent(&buyer_a), cap);
+    assert_eq!(sale.get_buyer_spent(&buyer_b), cap);
+}
+
+#[test]
+fn test_buyer_cap_zero_means_no_cap() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, _, sell_token, _, _, _, _) = setup_sale(&e);
+
+    // cap=0 in setup → no limit
+    sale.trade(&buyer, &(500 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer), 500 * 10_000_000);
+}
+
+// ═══════════════════════════════════════════════════════
+//  6. EMERGENCY DRAIN — 4 tests
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_emergency_drain() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, admin, _, _, sell_token, _, _, _, sale_id) = setup_sale(&e);
+
+    let balance_before = sell_token.balance(&sale_id);
+    assert_eq!(balance_before, 1_000 * 10_000_000);
+
+    sale.emergency_drain();
+
+    // Contract is paused
+    assert_eq!(sale.get_offer().is_active, false);
+    // All tokens drained to admin
+    assert_eq!(sell_token.balance(&sale_id), 0);
+    assert_eq!(sell_token.balance(&admin), balance_before);
+}
+
+#[test]
+fn test_emergency_drain_empty_contract() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, admin, _, _, sell_token, _, _, _, sale_id) = setup_sale(&e);
+
+    // First drain everything
+    sale.withdraw(&sell_token.address, &(1_000 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&sale_id), 0);
+
+    // Emergency drain on empty contract — should not panic
+    sale.emergency_drain();
+    assert_eq!(sale.get_offer().is_active, false);
+    assert_eq!(sell_token.balance(&admin), 1_000 * 10_000_000);
+}
+
+#[test]
+fn test_emergency_drain_blocks_further_trades() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_sale(&e);
+
+    sale.emergency_drain();
+
+    let result = sale.try_trade(&buyer, &(10 * 10_000_000i128));
+    assert_eq!(result, Err(Ok(SaleError::NotActive)));
+}
+
+#[test]
+fn test_emergency_drain_after_partial_trades() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, admin, buyer, _, sell_token, _, _, _, sale_id) = setup_sale(&e);
+
+    // Some trades happen
+    sale.trade(&buyer, &(300 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&sale_id), 700 * 10_000_000);
+
+    // Emergency drain
+    sale.emergency_drain();
+    assert_eq!(sell_token.balance(&sale_id), 0);
+    assert_eq!(sell_token.balance(&admin), 700 * 10_000_000);
+}
+
+// ═══════════════════════════════════════════════════════
+//  7. ADMIN TRANSFER (2-step) — 6 tests
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_admin_transfer_happy_path() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, old_admin, _, _, _, _, _, _, _) = setup_sale(&e);
+    let new_admin = Address::generate(&e);
+
+    // Step 1: propose
+    sale.propose_admin(&new_admin);
+
+    // Step 2: accept
+    sale.accept_admin();
+
+    let offer = sale.get_offer();
+    assert_eq!(offer.admin, new_admin);
+    assert_ne!(offer.admin, old_admin);
+}
+
+#[test]
+fn test_admin_transfer_new_admin_can_withdraw() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, _old_admin, _, _, sell_token, _, _, _, sale_id) = setup_sale(&e);
+    let new_admin = Address::generate(&e);
+
+    sale.propose_admin(&new_admin);
+    sale.accept_admin();
+
+    // New admin can withdraw (goes to new admin)
+    sale.withdraw(&sell_token.address, &(100 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&new_admin), 100 * 10_000_000);
+    assert_eq!(sell_token.balance(&sale_id), 900 * 10_000_000);
+}
+
+#[test]
+fn test_admin_transfer_accept_without_propose() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, _, _, _, _, _, _, _, _) = setup_sale(&e);
+
+    let result = sale.try_accept_admin();
+    assert_eq!(result, Err(Ok(SaleError::NoPendingAdmin)));
+}
+
+#[test]
+fn test_admin_transfer_propose_overwrite() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, _, _, _, _, _, _, _, _) = setup_sale(&e);
+    let first = Address::generate(&e);
+    let second = Address::generate(&e);
+
+    sale.propose_admin(&first);
+    sale.propose_admin(&second); // overwrite
+
+    sale.accept_admin();
+    assert_eq!(sale.get_offer().admin, second); // second wins
+}
+
+#[test]
+fn test_admin_transfer_chain() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, admin_a, _, _, _, _, _, _, _) = setup_sale(&e);
+    let admin_b = Address::generate(&e);
+    let admin_c = Address::generate(&e);
+
+    // A → B
+    sale.propose_admin(&admin_b);
+    sale.accept_admin();
+    assert_eq!(sale.get_offer().admin, admin_b);
+
+    // B → C
+    sale.propose_admin(&admin_c);
+    sale.accept_admin();
+    assert_eq!(sale.get_offer().admin, admin_c);
+
+    // Verify A is no longer admin
+    assert_ne!(sale.get_offer().admin, admin_a);
+}
+
+#[test]
+fn test_admin_transfer_seller_unchanged() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, _old_admin, _, _, _, _, _, _, _) = setup_sale(&e);
+    let new_admin = Address::generate(&e);
+
+    let seller_before = sale.get_offer().seller.clone();
+
+    sale.propose_admin(&new_admin);
+    sale.accept_admin();
+
+    // Admin changed, seller unchanged
+    assert_eq!(sale.get_offer().admin, new_admin);
+    assert_eq!(sale.get_offer().seller, seller_before);
+}
+
+// ═══════════════════════════════════════════════════════
+//  8. BUYER FREEZE — 5 tests
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_freeze_buyer_blocks_trade() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_sale(&e);
+
+    sale.freeze_buyer(&buyer, &true);
+    assert_eq!(sale.is_frozen(&buyer), true);
+
+    let result = sale.try_trade(&buyer, &(10 * 10_000_000i128));
+    assert_eq!(result, Err(Ok(SaleError::BuyerBlocked)));
+}
+
+#[test]
+fn test_unfreeze_buyer_allows_trade() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, _, buyer, _, sell_token, _, _, _, _) = setup_sale(&e);
+
+    sale.freeze_buyer(&buyer, &true);
+    assert_eq!(sale.try_trade(&buyer, &(10 * 10_000_000i128)), Err(Ok(SaleError::BuyerBlocked)));
+
+    sale.freeze_buyer(&buyer, &false);
+    assert_eq!(sale.is_frozen(&buyer), false);
+
+    sale.trade(&buyer, &(10 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer), 10 * 10_000_000);
+}
+
+#[test]
+fn test_freeze_only_affects_target() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer_a = Address::generate(&e);
+    let buyer_b = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &0, &0, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    buy_token_admin.mint(&buyer_a, &(100 * 10_000_000i128));
+    buy_token_admin.mint(&buyer_b, &(100 * 10_000_000i128));
+    sale.set_active(&true);
+
+    // Freeze A only
+    sale.freeze_buyer(&buyer_a, &true);
+
+    // B can still trade
+    sale.trade(&buyer_b, &(50 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer_b), 50 * 10_000_000);
+
+    // A is blocked
+    let result = sale.try_trade(&buyer_a, &(50 * 10_000_000i128));
+    assert_eq!(result, Err(Ok(SaleError::BuyerBlocked)));
+}
+
+#[test]
+fn test_freeze_idempotent() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_sale(&e);
+
+    // Double freeze — no panic
+    sale.freeze_buyer(&buyer, &true);
+    sale.freeze_buyer(&buyer, &true);
+    assert_eq!(sale.is_frozen(&buyer), true);
+
+    // Double unfreeze — no panic
+    sale.freeze_buyer(&buyer, &false);
+    sale.freeze_buyer(&buyer, &false);
+    assert_eq!(sale.is_frozen(&buyer), false);
+}
+
+#[test]
+fn test_unfrozen_by_default() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_sale(&e);
+
+    // Fresh buyer is NOT frozen
+    assert_eq!(sale.is_frozen(&buyer), false);
+    assert_eq!(sale.is_frozen(&Address::generate(&e)), false);
+}
+
+// ═══════════════════════════════════════════════════════
+//  9. withdraw / set_active / updt_price / updt_terms — 13 tests
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_withdraw_happy_path() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, admin, _, _, sell_token, _, _, _, sale_id) = setup_sale(&e);
+    sale.withdraw(&sell_token.address, &(200 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&sale_id), 800 * 10_000_000);
+    assert_eq!(sell_token.balance(&admin), 200 * 10_000_000);
+}
+
+#[test]
+fn test_withdraw_zero() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, _, _, sell_token, _, _, _, _) = setup_sale(&e);
+    assert_eq!(sale.try_withdraw(&sell_token.address, &0), Err(Ok(SaleError::InvalidAmount)));
+}
+
+#[test]
+fn test_withdraw_negative() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, _, _, sell_token, _, _, _, _) = setup_sale(&e);
+    assert_eq!(sale.try_withdraw(&sell_token.address, &-1), Err(Ok(SaleError::InvalidAmount)));
+}
+
+#[test]
+fn test_set_active_toggle() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, _, _, _, _, _, _, _) = setup_sale(&e);
+    sale.set_active(&false);
+    assert_eq!(sale.get_offer().is_active, false);
+    sale.set_active(&true);
+    assert_eq!(sale.get_offer().is_active, true);
+}
+
+#[test]
+fn test_updt_price_happy() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, _, _, _, _, _, _, _) = setup_sale(&e);
+    sale.updt_price(&5, &2);
+    let offer = sale.get_offer();
+    assert_eq!(offer.sell_price, 5);
+    assert_eq!(offer.buy_price, 2);
+}
+
+#[test]
+fn test_updt_price_zero() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, _, _, _, _, _, _, _) = setup_sale(&e);
+    assert_eq!(sale.try_updt_price(&0, &1), Err(Ok(SaleError::ZeroPrice)));
+    assert_eq!(sale.try_updt_price(&1, &0), Err(Ok(SaleError::ZeroPrice)));
+}
+
+#[test]
+fn test_updt_terms_happy() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, _, _, _, _, _, _, _) = setup_sale(&e);
+    sale.updt_terms(&(50 * 10_000_000i128), &(400 * 10_000_000i128), &(2 * 10_000_000i128));
+    let offer = sale.get_offer();
+    assert_eq!(offer.min_buy_amount, 50 * 10_000_000);
+    assert_eq!(offer.max_buy_per_buyer, 400 * 10_000_000);
+    assert_eq!(offer.fixed_fee, 2 * 10_000_000);
+}
+
+#[test]
+fn test_updt_terms_rejects_negative() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, _, _, _, _, _, _, _) = setup_sale(&e);
+    assert_eq!(sale.try_updt_terms(&-1, &0, &0), Err(Ok(SaleError::InvalidAmount)));
+    assert_eq!(sale.try_updt_terms(&0, &-1, &0), Err(Ok(SaleError::InvalidAmount)));
+    assert_eq!(sale.try_updt_terms(&0, &0, &-1), Err(Ok(SaleError::InvalidAmount)));
+}
+
+#[test]
+fn test_updt_terms_rejects_cap_below_min() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, _, _, _, _, _, _, _) = setup_sale(&e);
+    // Would make the offer unbuyable: every trade fails one gate or the other.
+    assert_eq!(
+        sale.try_updt_terms(&(100 * 10_000_000i128), &(50 * 10_000_000i128), &0),
+        Err(Ok(SaleError::InvalidAmount))
+    );
+    // 0 = uncapped, so it is NOT "below" the minimum.
+    sale.updt_terms(&(100 * 10_000_000i128), &0, &0);
+    assert_eq!(sale.get_offer().max_buy_per_buyer, 0);
+}
+
+#[test]
+fn test_updt_terms_raises_cap_for_capped_buyer() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, _, sell_token, _, _, _, _) = setup_sale(&e);
+    sale.updt_terms(&0, &(100 * 10_000_000i128), &0);
+    sale.trade(&buyer, &(100 * 10_000_000i128));
+    // Cap is CUMULATIVE — splitting the ticket does not get around it.
+    assert_eq!(
+        sale.try_trade(&buyer, &(100 * 10_000_000i128)),
+        Err(Ok(SaleError::BuyerCapExceeded))
+    );
+    sale.updt_terms(&0, &(300 * 10_000_000i128), &0);
+    sale.trade(&buyer, &(200 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer), 300 * 10_000_000);
+}
+
+#[test]
+fn test_updt_terms_cap_introduced_later_counts_earlier_buys() {
+    // The setter's sharpest edge: a cap introduced AFTER trading started must
+    // still be cumulative over everything the buyer already took. Before the
+    // ledger was made unconditional, this passed at 450 against a 50 cap.
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_sale(&e); // starts uncapped
+    sale.trade(&buyer, &(400 * 10_000_000i128));
+    assert_eq!(sale.get_buyer_spent(&buyer), 400 * 10_000_000, "spend is recorded while uncapped");
+
+    sale.updt_terms(&0, &(50 * 10_000_000i128), &0);
+    assert_eq!(
+        sale.try_trade(&buyer, &(50 * 10_000_000i128)),
+        Err(Ok(SaleError::BuyerCapExceeded)),
+        "already 400 over a fresh 50 cap — the next buy must not sail through",
+    );
+
+    // A buyer who never traded is unaffected by the others' history.
+    let fresh = Address::generate(&e);
+    assert_eq!(sale.get_buyer_spent(&fresh), 0);
+}
+
+#[test]
+fn test_updt_terms_zeroing_fee_stops_charging() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, treasury, _, _, buy_token, _, _) = setup_sale(&e);
+    sale.updt_terms(&0, &0, &(5 * 10_000_000i128));
+    sale.trade(&buyer, &(100 * 10_000_000i128));
+    assert_eq!(buy_token.balance(&treasury), 5 * 10_000_000);
+
+    sale.updt_terms(&0, &0, &0);
+    let before = buy_token.balance(&buyer);
+    sale.trade(&buyer, &(100 * 10_000_000i128));
+    assert_eq!(buy_token.balance(&treasury), 5 * 10_000_000); // unchanged
+    assert_eq!(buy_token.balance(&buyer), before - 100 * 10_000_000); // principal only
+}
+
+#[test]
+fn test_trade_uses_updated_price() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, _, sell_token, _, _, _, _) = setup_sale(&e);
+    sale.trade(&buyer, &(100 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer), 100 * 10_000_000);
+    sale.updt_price(&2, &1);
+    sale.trade(&buyer, &(100 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer), 300 * 10_000_000); // 100 + 200
+}
+
+#[test]
+fn test_trade_after_pause_resume() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, _, sell_token, _, _, _, _) = setup_sale(&e);
+    sale.set_active(&false);
+    assert_eq!(sale.try_trade(&buyer, &(10 * 10_000_000i128)), Err(Ok(SaleError::NotActive)));
+    sale.set_active(&true);
+    sale.trade(&buyer, &(10 * 10_000_000i128));
+    assert_eq!(sell_token.balance(&buyer), 10 * 10_000_000);
+}
+
+// ═══════════════════════════════════════════════════════
+//  10. FEE SPLIT — 5 tests
+// ═══════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════
+//  10. FIXED FEE — 5 tests
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_trade_fixed_fee_5_usdc() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let company = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    // fixed_fee = 50_000_000 stroops = $5 USDC (additive)
+    let fee: i128 = 50_000_000;
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &company, &fee, &1, &1, &0, &0, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    // Buyer needs 100 USDC + $5 fee = 105 USDC
+    buy_token_admin.mint(&buyer, &(105 * 10_000_000i128));
+    sale.set_active(&true);
+
+    let amount: i128 = 100 * 10_000_000; // 100 USDC investment
+    sale.trade(&buyer, &amount);
+    // Additive fee: company gets full $100, treasury gets $5
+    assert_eq!(buy_token.balance(&treasury), 50_000_000);       // $5 fee
+    assert_eq!(buy_token.balance(&company), 100 * 10_000_000);  // $100 investment
+    assert_eq!(buy_token.balance(&buyer), 0);                   // 105 - 105 = 0
+    assert_eq!(sell_token.balance(&buyer), 100 * 10_000_000);   // 100 tokens
+}
+
+#[test]
+fn test_trade_fixed_fee_zero_no_fee() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let company = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    // fixed_fee = 0 → company gets 100%
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &company, &0i128, &1, &1, &0, &0, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    buy_token_admin.mint(&buyer, &(100 * 10_000_000i128));
+    sale.set_active(&true);
+
+    sale.trade(&buyer, &(100 * 10_000_000i128));
+    assert_eq!(buy_token.balance(&treasury), 0);
+    assert_eq!(buy_token.balance(&company), 100 * 10_000_000);
+}
+
+#[test]
+fn test_trade_insufficient_balance_for_fee() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let company = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    // fixed_fee = $5. Buyer has $10, wants to buy $10 → needs $15, fails
+    let fee: i128 = 50_000_000;
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &company, &fee, &1, &1, &0, &0, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    // Buyer only has $10, but $10 trade + $5 fee = $15 needed
+    buy_token_admin.mint(&buyer, &(10 * 10_000_000i128));
+    sale.set_active(&true);
+
+    // $10 trade → needs $15, but only has $10 → transfer fails (Soroban reverts)
+    let result = sale.try_trade(&buyer, &(10 * 10_000_000i128));
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_trade_fixed_fee_just_above() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let company = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    // fixed_fee = $5. Trade 1 stroop → company gets 1 stroop, treasury gets $5
+    let fee: i128 = 50_000_000;
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &company, &fee, &1, &1, &0, &0, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(1_000 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * 10_000_000i128));
+    // Buyer needs 1 stroop + $5 fee
+    buy_token_admin.mint(&buyer, &(50_000_001i128));
+    sale.set_active(&true);
+
+    let one_stroop: i128 = 1;
+    sale.trade(&buyer, &one_stroop);
+    assert_eq!(buy_token.balance(&treasury), 50_000_000); // $5 fee
+    assert_eq!(buy_token.balance(&company), 1);            // 1 stroop investment
+    assert_eq!(sell_token.balance(&buyer), 1);             // 1 token
+}
+
+#[test]
+fn test_create_negative_fixed_fee() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    let result = sale.try_create(&admin, &admin, &sell_token.address, &buy_token.address, &Address::generate(&e), &Address::generate(&e), &-1i128, &1, &1, &0, &0, &0, &0, &0);
+    assert_eq!(result, Err(Ok(SaleError::InvalidAmount)));
+}
+
+// ═══════════════════════════════════════════════════════
+//  11. Read-only + extend_ttl + overflow — 5 tests
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_version_returns_8() {
+    let e = Env::default();
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    assert_eq!(sale.version(), 9);
+}
+
+#[test]
+fn test_extend_ttl_anyone_can_call() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, _, _, _, _, _, _, _) = setup_sale(&e);
+    sale.extend_ttl();
+}
+
+#[test]
+fn test_get_balance_after_trades() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_sale(&e);
+    assert_eq!(sale.get_balance(), 1_000 * 10_000_000);
+    sale.trade(&buyer, &(100 * 10_000_000i128));
+    assert_eq!(sale.get_balance(), 900 * 10_000_000);
+}
+
+#[test]
+fn test_overflow_i128_max() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &buyer);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &Address::generate(&e), &Address::generate(&e), &0i128, &2, &1, &0, &0, &0, &0, &0);
+    sale.set_active(&true);
+    assert_eq!(sale.try_trade(&buyer, &i128::MAX), Err(Ok(SaleError::Overflow)));
+}
+
+#[test]
+fn test_atomicity_failed_trade_reverts() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let buyer = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    sale.create(&admin, &admin, &sell_token.address, &buy_token.address, &treasury, &Address::generate(&e), &0i128, &1, &1, &0, &0, &0, &0, &0);
+    sell_token_admin.mint(&admin, &(5 * 10_000_000i128));
+    sell_token.transfer(&admin, &sale_id, &(5 * 10_000_000i128));
+    buy_token_admin.mint(&buyer, &(100 * 10_000_000i128));
+    sale.set_active(&true);
+
+    let buyer_before = buy_token.balance(&buyer);
+    let contract_before = sell_token.balance(&sale_id);
+    let treasury_before = buy_token.balance(&treasury);
+
+    let result = sale.try_trade(&buyer, &(50 * 10_000_000i128));
+    assert!(result.is_err());
+
+    assert_eq!(buy_token.balance(&buyer), buyer_before);
+    assert_eq!(sell_token.balance(&sale_id), contract_before);
+    assert_eq!(buy_token.balance(&treasury), treasury_before);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  11. AUTH ENFORCEMENT — 9 tests (NO mock_all_auths!)
+//
+//  These tests run WITHOUT mock_all_auths(). They use
+//  e.as_contract() to seed storage directly, then verify
+//  that require_auth() panics for every sensitive function.
+//  If require_auth() was ever accidentally removed from
+//  any function, these tests would FAIL (not panic).
+// ═══════════════════════════════════════════════════════════
+
+/// Helper: seed the Offer into contract storage without mock_all_auths.
+fn seed_offer(e: &Env, contract: &Address, admin: &Address, seller: &Address) {
+    e.as_contract(contract, || {
+        e.storage().instance().set(
+            &DataKey::Offer,
+            &Offer {
+                admin: admin.clone(),
+                seller: seller.clone(),
+                sell_token: Address::generate(e),
+                buy_token: Address::generate(e),
+                treasury: Address::generate(e),
+                company: Address::generate(e),
+                fixed_fee: 0,
+                sell_price: 1,
+                buy_price: 1,
+                is_active: true,
+                deadline_ledger: 0,
+                min_buy_amount: 0,
+                max_buy_per_buyer: 0,
+            },
+        );
+    });
+}
+
+#[test]
+#[should_panic]
+fn test_auth_create_requires_admin_auth() {
+    let e = Env::default();
+    // NO mock_all_auths
+    let admin = Address::generate(&e);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    // require_auth() on admin will panic — no auth provided
+    sale.create(
+        &admin, &admin,
+        &Address::generate(&e), &Address::generate(&e), &Address::generate(&e),
+        &Address::generate(&e), &0i128,
+        &1, &1, &0, &0, &0, &0, &0,
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_auth_trade_requires_buyer_auth() {
+    let e = Env::default();
+    // NO mock_all_auths
+    let buyer = Address::generate(&e);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+
+    // buyer.require_auth() is the FIRST statement in trade()
+    // Panics before even loading the offer
+    sale.trade(&buyer, &100);
+}
+
+#[test]
+#[should_panic]
+fn test_auth_withdraw_requires_admin_auth() {
+    let e = Env::default();
+    // NO mock_all_auths
+    let admin = Address::generate(&e);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    seed_offer(&e, &sale_id, &admin, &admin);
+
+    // offer.admin.require_auth() panics — no auth
+    sale.withdraw(&Address::generate(&e), &100);
+}
+
+#[test]
+#[should_panic]
+fn test_auth_emergency_drain_requires_admin_auth() {
+    let e = Env::default();
+    // NO mock_all_auths
+    let admin = Address::generate(&e);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    seed_offer(&e, &sale_id, &admin, &admin);
+
+    // offer.admin.require_auth() panics — no auth
+    sale.emergency_drain();
+}
+
+#[test]
+#[should_panic]
+fn test_auth_set_active_requires_seller_auth() {
+    let e = Env::default();
+    // NO mock_all_auths
+    let admin = Address::generate(&e);
+    let seller = Address::generate(&e);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    seed_offer(&e, &sale_id, &admin, &seller);
+
+    // offer.seller.require_auth() panics — no auth
+    sale.set_active(&true);
+}
+
+#[test]
+#[should_panic]
+fn test_auth_updt_price_requires_seller_auth() {
+    let e = Env::default();
+    // NO mock_all_auths
+    let admin = Address::generate(&e);
+    let seller = Address::generate(&e);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    seed_offer(&e, &sale_id, &admin, &seller);
+
+    // offer.seller.require_auth() panics — no auth
+    sale.updt_price(&5, &2);
+}
+
+#[test]
+#[should_panic]
+fn test_auth_updt_terms_requires_seller_auth() {
+    let e = Env::default();
+    // NO mock_all_auths
+    let admin = Address::generate(&e);
+    let seller = Address::generate(&e);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    seed_offer(&e, &sale_id, &admin, &seller);
+
+    // offer.seller.require_auth() panics — no auth
+    sale.updt_terms(&0, &0, &0);
+}
+
+#[test]
+#[should_panic]
+fn test_auth_propose_admin_requires_admin_auth() {
+    let e = Env::default();
+    // NO mock_all_auths
+    let admin = Address::generate(&e);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    seed_offer(&e, &sale_id, &admin, &admin);
+
+    // offer.admin.require_auth() panics — no auth
+    sale.propose_admin(&Address::generate(&e));
+}
+
+#[test]
+#[should_panic]
+fn test_auth_accept_admin_requires_pending_auth() {
+    let e = Env::default();
+    // NO mock_all_auths
+    let admin = Address::generate(&e);
+    let pending = Address::generate(&e);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    seed_offer(&e, &sale_id, &admin, &admin);
+
+    // Seed pending admin in storage
+    e.as_contract(&sale_id, || {
+        e.storage().instance().set(&DataKey::PendingAdmin, &pending);
+    });
+
+    // pending.require_auth() panics — no auth
+    sale.accept_admin();
+}
+
+#[test]
+#[should_panic]
+fn test_auth_freeze_buyer_requires_admin_auth() {
+    let e = Env::default();
+    // NO mock_all_auths
+    let admin = Address::generate(&e);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    seed_offer(&e, &sale_id, &admin, &admin);
+
+    // offer.admin.require_auth() panics — no auth
+    sale.freeze_buyer(&Address::generate(&e), &true);
+}
+
+// ═══════════════════════════════════════════════════════
+//  F-006 — canonical USDC SAC rejection path
+//  These tests ONLY compile when the `testing` feature is OFF — i.e. when
+//  the const-baked validation in lib.rs is active. Run with:
+//     cargo test --no-default-features --features testnet
+// ═══════════════════════════════════════════════════════
+#[cfg(not(feature = "testing"))]
+mod canonical_usdc_tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    #[test]
+    fn test_create_rejects_non_canonical_buy_token() {
+        let e = Env::default();
+        e.mock_all_auths();
+        let sale_id = e.register(TokenSale, ());
+        let sale = TokenSaleClient::new(&e, &sale_id);
+
+        let admin = Address::generate(&e);
+        let seller = Address::generate(&e);
+        let sell_token = Address::generate(&e);
+        // Random address — guaranteed not equal to the canonical USDC SAC const.
+        let fake_buy_token = Address::generate(&e);
+        let treasury = Address::generate(&e);
+        let company = Address::generate(&e);
+
+        let result = sale.try_create(
+            &admin, &seller, &sell_token, &fake_buy_token, &treasury, &company,
+            &0i128, &1u32, &1u32, &0u32, &0i128, &0i128, &0u32, &0,
+        );
+        assert_eq!(result, Err(Ok(SaleError::UnauthorizedToken)));
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+//  12. v8 ESCROW — create/target (D1, D4)
+// ═══════════════════════════════════════════════════════
+
+const U: i128 = 10_000_000; // 1 unit at 7 decimals
+
+/// Escrow setup: admin==seller, $5 fee (exercises D10), 1:1 price, deadline
+/// at ledger `deadline`, supply of 1000 tokens → Target = 1000 U.
+fn setup_escrow<'a>(
+    e: &Env,
+    deadline: u32,
+) -> (TokenSaleClient<'a>, Address, Address, Address, Address, token::Client<'a>, token::Client<'a>, token::StellarAssetClient<'a>, Address) {
+    e.mock_all_auths();
+    let admin = Address::generate(e);
+    let treasury = Address::generate(e);
+    let company = Address::generate(e);
+    let (sell_token, sell_token_admin) = create_token_contract(e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(e, &sale_id);
+
+    sale.create(
+        &admin, &admin, &sell_token.address, &buy_token.address, &treasury, &company,
+        &(5 * U), // $5 fixed fee — cost recovery, paid at trade (D10)
+        &1, &1, &deadline, &0, &0,
+        &1, &0, // MODE_ESCROW
+    );
+    let supply: i128 = 1_000 * U;
+    sell_token_admin.mint(&admin, &supply);
+    sell_token.transfer(&admin, &sale_id, &supply);
+    sale.set_active(&true);
+
+    let buyer = Address::generate(e);
+    buy_token_admin.mint(&buyer, &(2_000 * U));
+    (sale, admin, buyer, treasury, company, sell_token, buy_token, buy_token_admin, sale_id)
+}
+
+#[test]
+fn test_escrow_create_requires_deadline() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let sale = TokenSaleClient::new(&e, &e.register(TokenSale, ()));
+    let result = sale.try_create(
+        &admin, &admin, &sell_token.address, &buy_token.address,
+        &Address::generate(&e), &Address::generate(&e),
+        &0i128, &1, &1, &0, &0, &0, &1, &0, // escrow + deadline 0
+    );
+    assert_eq!(result, Err(Ok(SaleError::DeadlineRequired)));
+}
+
+#[test]
+fn test_escrow_create_rejects_unknown_mode() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let sale = TokenSaleClient::new(&e, &e.register(TokenSale, ()));
+    let result = sale.try_create(
+        &admin, &admin, &sell_token.address, &buy_token.address,
+        &Address::generate(&e), &Address::generate(&e),
+        &0i128, &1, &1, &1000, &0, &0, &2, &0,
+    );
+    assert_eq!(result, Err(Ok(SaleError::InvalidAmount)));
+}
+
+#[test]
+fn test_escrow_target_frozen_at_first_activation() {
+    let e = Env::default();
+    let (sale, _, _, _, _, _, _, _, _) = setup_escrow(&e, 1_000);
+    let (mode, state, target, raised) = sale.get_raise();
+    assert_eq!((mode, state), (1, 0));
+    assert_eq!(target, 1_000 * U); // supply × 1:1
+    assert_eq!(raised, 0);
+    // Pause + resume must NOT recompute the target.
+    sale.set_active(&false);
+    sale.set_active(&true);
+    assert_eq!(sale.get_raise().2, 1_000 * U);
+}
+
+// ═══════════════════════════════════════════════════════
+//  13. v8 ESCROW — trade holds principal, fee out now (D8/D10/D13)
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_escrow_trade_holds_principal_pays_fee_retains_tokens() {
+    let e = Env::default();
+    let (sale, _, buyer, treasury, company, sell_token, buy_token, _, sale_id) = setup_escrow(&e, 1_000);
+
+    sale.trade(&buyer, &(100 * U));
+
+    // D13 conservation, line by line:
+    assert_eq!(buy_token.balance(&buyer), (2_000 - 100 - 5) * U, "buyer paid principal + fee");
+    assert_eq!(buy_token.balance(&treasury), 5 * U, "fee is cost recovery — treasury paid NOW");
+    assert_eq!(buy_token.balance(&sale_id), 100 * U, "contract escrows exactly the principal");
+    assert_eq!(buy_token.balance(&company), 0, "company sees NOTHING before close");
+    assert_eq!(sell_token.balance(&buyer), 0, "tokens are retained (sandwich-safe)");
+    assert_eq!(sale.get_escrow_of(&buyer), (100 * U, 100 * U));
+    assert_eq!(sale.get_raise().3, 100 * U);
+}
+
+#[test]
+fn test_escrow_trade_rejects_overshoot() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, buy_token_admin, _) = setup_escrow(&e, 1_000);
+    buy_token_admin.mint(&buyer, &(10_000 * U));
+    let result = sale.try_trade(&buyer, &(1_001 * U)); // target is 1000 U
+    assert_eq!(result, Err(Ok(SaleError::ExceedsRemaining)));
+}
+
+#[test]
+fn test_escrow_closing_purchase_exempt_from_min_buy() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let treasury = Address::generate(&e);
+    let company = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    // min_buy = 100 U; supply 250 U → after two 100 U buys, 50 U of dust remains
+    sale.create(
+        &admin, &admin, &sell_token.address, &buy_token.address, &treasury, &company,
+        &0i128, &1, &1, &1_000, &(100 * U), &0, &1, &0,
+    );
+    sell_token_admin.mint(&admin, &(250 * U));
+    sell_token.transfer(&admin, &sale_id, &(250 * U));
+    sale.set_active(&true);
+    let buyer = Address::generate(&e);
+    buy_token_admin.mint(&buyer, &(1_000 * U));
+
+    sale.trade(&buyer, &(100 * U));
+    sale.trade(&buyer, &(100 * U));
+    // 50 U below min — rejected UNLESS it closes the round…
+    assert_eq!(sale.try_trade(&buyer, &(40 * U)), Err(Ok(SaleError::BelowMinimum)));
+    // …and the exact remainder IS accepted (D7): without this the round
+    // strands 50 U forever — the dust trap the live mainnet offer proved.
+    sale.trade(&buyer, &(50 * U));
+    assert_eq!(sale.get_raise().3, 250 * U);
+    sale.close();
+    assert_eq!(buy_token.balance(&company), 250 * U);
+}
+
+// ═══════════════════════════════════════════════════════
+//  14. v8 ESCROW — close (D2/D12)
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_escrow_close_before_target_rejected() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    assert_eq!(sale.try_close(), Err(Ok(SaleError::TargetNotReached)));
+}
+
+#[test]
+fn test_escrow_close_pays_company_exactly_target_and_is_idempotent() {
+    let e = Env::default();
+    let (sale, _, buyer, treasury, company, _, buy_token, _, sale_id) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(600 * U));
+    sale.trade(&buyer, &(400 * U));
+
+    sale.close();
+    assert_eq!(buy_token.balance(&company), 1_000 * U, "company receives the full target, once");
+    assert_eq!(buy_token.balance(&sale_id), 0, "no investor money lingers");
+    assert_eq!(buy_token.balance(&treasury), 10 * U, "two $5 fees, paid at trade time");
+    assert_eq!(sale.get_raise().1, 1); // Closed
+
+    sale.close(); // idempotent — must NOT double-pay
+    assert_eq!(buy_token.balance(&company), 1_000 * U);
+
+    // close() pauses the sale, so the earlier is_active gate answers first —
+    // equivalent rejection, accurate message ("sale not active").
+    assert_eq!(sale.try_trade(&buyer, &(1 * U)), Err(Ok(SaleError::NotActive)));
+}
+
+#[test]
+fn test_escrow_closed_locks_sell_token_withdrawals() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, sell_token, _, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(1_000 * U));
+    sale.close();
+    // v9: in Closed only the SURPLUS (balance - tokens owed) may leave; a full
+    // close has no surplus, so any amount exceeds it.
+    assert_eq!(sale.try_withdraw(&sell_token.address, &(1 * U)), Err(Ok(SaleError::ExceedsRemaining)));
+}
+
+// ═══════════════════════════════════════════════════════
+//  15. v8 ESCROW — fail + refund (D3/D4)
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_escrow_fail_before_deadline_rejected() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    assert_eq!(sale.try_fail(), Err(Ok(SaleError::NotExpired)));
+}
+
+#[test]
+fn test_escrow_fail_when_target_met_rejected() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(1_000 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    // Fully subscribed: the only valid exit is close(), even past deadline.
+    assert_eq!(sale.try_fail(), Err(Ok(SaleError::WrongState)));
+    sale.close();
+}
+
+#[test]
+fn test_escrow_refund_returns_principal_not_fee() {
+    let e = Env::default();
+    let (sale, admin, buyer, treasury, company, sell_token, buy_token, _, sale_id) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(300 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    sale.fail();
+    assert_eq!(sale.get_raise().1, 2); // Failed
+    sale.fail(); // idempotent
+
+    sale.refund(&buyer);
+    // D13: principal back; fee stays with treasury (cost recovery, D10).
+    assert_eq!(buy_token.balance(&buyer), (2_000 - 5) * U, "principal refunded, $5 fee kept");
+    assert_eq!(buy_token.balance(&treasury), 5 * U);
+    assert_eq!(buy_token.balance(&company), 0, "company never touched a cent");
+    assert_eq!(buy_token.balance(&sale_id), 0, "escrow fully unwound");
+    assert_eq!(sell_token.balance(&buyer), 0, "no tokens ever moved");
+    assert_eq!(sale.get_escrow_of(&buyer), (0, 0));
+
+    // Second refund: nothing left.
+    assert_eq!(sale.try_refund(&buyer), Err(Ok(SaleError::NothingToClaim)));
+
+    // Tokens go home via withdraw (allowed in Failed).
+    sale.withdraw(&sell_token.address, &(1_000 * U));
+    assert_eq!(sell_token.balance(&admin), 1_000 * U);
+}
+
+#[test]
+fn test_escrow_refund_wrong_state_and_frozen() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    assert_eq!(sale.try_refund(&buyer), Err(Ok(SaleError::WrongState)), "no refunds while Raising");
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    sale.fail();
+    sale.freeze_buyer(&buyer, &true);
+    assert_eq!(sale.try_refund(&buyer), Err(Ok(SaleError::BuyerBlocked)), "compliance hold");
+    sale.freeze_buyer(&buyer, &false);
+    sale.refund(&buyer);
+}
+
+// ═══════════════════════════════════════════════════════
+//  16. v8 ESCROW — claims (D8)
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_escrow_claim_delivers_owed_tokens_once() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, sell_token, _, buy_token_admin, sale_id) = setup_escrow(&e, 1_000);
+    let buyer2 = Address::generate(&e);
+    buy_token_admin.mint(&buyer2, &(1_000 * U));
+
+    assert_eq!(sale.try_claim_tokens(&buyer), Err(Ok(SaleError::WrongState)), "no claims while Raising");
+    sale.trade(&buyer, &(600 * U));
+    sale.trade(&buyer2, &(400 * U));
+    sale.close();
+
+    sale.claim_tokens(&buyer);
+    assert_eq!(sell_token.balance(&buyer), 600 * U);
+    assert_eq!(sale.try_claim_tokens(&buyer), Err(Ok(SaleError::NothingToClaim)));
+
+    sale.claim_tokens(&buyer2);
+    assert_eq!(sell_token.balance(&buyer2), 400 * U);
+    assert_eq!(sell_token.balance(&sale_id), 0, "fully subscribed + fully claimed = empty");
+}
+
+#[test]
+fn test_escrow_owed_accumulates_per_trade_floors() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    // Non-1:1 price (2 tokens per 3 USDC): floor division per trade.
+    sale.create(
+        &admin, &admin, &sell_token.address, &buy_token.address,
+        &Address::generate(&e), &Address::generate(&e),
+        &0i128, &2, &3, &1_000, &0, &0, &1, &0,
+    );
+    sell_token_admin.mint(&admin, &1_000);
+    sell_token.transfer(&admin, &sale_id, &1_000);
+    sale.set_active(&true);
+    let buyer = Address::generate(&e);
+    buy_token_admin.mint(&buyer, &10_000);
+
+    // Two trades of 5: floor(5×2/3)=3 each → owed 6. (One trade of 10 would owe 6 too,
+    // but Σfloor must equal what each trade computed — that is the recorded truth.)
+    sale.trade(&buyer, &5);
+    sale.trade(&buyer, &5);
+    assert_eq!(sale.get_escrow_of(&buyer).1, 6);
+}
+
+// ═══════════════════════════════════════════════════════
+//  17. v8 — price lock + withdraw restriction (D5/D6)
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_escrow_price_locked_once_target_set() {
+    let e = Env::default();
+    let (sale, _, _, _, _, _, _, _, _) = setup_escrow(&e, 1_000);
+    assert_eq!(sale.try_updt_price(&2, &1), Err(Ok(SaleError::PriceLocked)));
+}
+
+#[test]
+fn test_withdraw_restricted_to_sell_token_even_in_failed() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, buy_token, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    sale.fail();
+    // In Failed the contract STILL holds refundable USDC — the PEND 66 bomb.
+    assert_eq!(sale.try_withdraw(&buy_token.address, &(1 * U)), Err(Ok(SaleError::UnauthorizedToken)));
+}
+
+// ═══════════════════════════════════════════════════════
+//  18. v8 — v7-born storage behaves as direct mode (D9 defaults)
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_v7_born_storage_defaults_to_direct_mode() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let (sale, _admin, buyer, _treasury, sell_token, _sta, _buy_token, _bta, sale_id) = setup_sale(&e);
+    // Simulate an instance whose storage was written by v7: the v8 keys do
+    // not exist at all. (The real WASM-swap migration test is the 7.3 gate —
+    // this one proves the unwrap_or defaults, which is what D9 relies on.)
+    e.as_contract(&sale_id, || {
+        e.storage().instance().remove(&DataKey::RaiseMode);
+        e.storage().instance().remove(&DataKey::SaleState);
+        e.storage().instance().remove(&DataKey::RaiseRaised);
+    });
+    assert_eq!(sale.get_raise(), (0, 0, 0, 0));
+    // Direct-mode trade still works exactly as v7…
+    sale.trade(&buyer, &(10 * U));
+    assert_eq!(sell_token.balance(&buyer), 10 * U);
+    // …and no escrow lifecycle is reachable.
+    assert_eq!(sale.try_close(), Err(Ok(SaleError::WrongState)));
+    assert_eq!(sale.try_fail(), Err(Ok(SaleError::WrongState)));
+    assert_eq!(sale.try_refund(&buyer), Err(Ok(SaleError::WrongState)));
+}
+
+// ═══════════════════════════════════════════════════════
+//  19. v8 — permissionless lifecycle (NO mock_all_auths)
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_close_fail_refund_require_no_auth() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, buy_token, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+
+    // Strip ALL auth mocks: pure functions of state must still run (D2/D3).
+    e.set_auths(&[]);
+    sale.fail();
+    sale.refund(&buyer);
+    assert_eq!(buy_token.balance(&buyer), (2_000 - 5) * U);
+}
+
+// ═══════════════════════════════════════════════════════
+//  20. v8 ESCROW — deadline (timeout) + storage validity
+// ═══════════════════════════════════════════════════════
+
+#[test]
+fn test_escrow_trade_after_deadline_rejected_even_before_fail() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    // The window between the deadline passing and anyone calling fail():
+    // state is still Raising, but no new money may enter a dead raise.
+    e.ledger().with_mut(|li| li.sequence_number = 1_001);
+    assert_eq!(sale.try_trade(&buyer, &(100 * U)), Err(Ok(SaleError::Expired)));
+    // And the raise is still fail()-able + refundable from that window.
+    sale.fail();
+    sale.refund(&buyer);
+}
+
+#[test]
+fn test_escrow_trade_at_exact_deadline_allowed() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow(&e, 1_000);
+    // Same `>` boundary semantics as v7 direct mode: the deadline ledger
+    // itself is still valid — a round can fill on its last ledger…
+    e.ledger().with_mut(|li| li.sequence_number = 1_000);
+    sale.trade(&buyer, &(1_000 * U));
+    // …and close after expiry (close has NO deadline check by design: a fully
+    // subscribed raise is owed its closing whenever it happens).
+    e.ledger().with_mut(|li| li.sequence_number = 5_000);
+    sale.close();
+    assert_eq!(sale.get_raise().1, 1);
+}
+
+#[test]
+fn test_escrow_money_bearing_keys_get_ttl_extended() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, sale_id) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    // Contribution/TokensOwed are the investor's refund/claim RIGHTS — their
+    // persistent entries must leave trade() with a fresh TTL (~30 days), not
+    // whatever default the ledger hands out. (Post-archival they remain
+    // restorable — persistent storage never loses money — but a fresh TTL is
+    // what keeps the pull paths one-tx cheap.)
+    let (c_ttl, t_ttl) = e.as_contract(&sale_id, || {
+        (
+            e.storage().persistent().get_ttl(&DataKey::Contribution(buyer.clone())),
+            e.storage().persistent().get_ttl(&DataKey::TokensOwed(buyer.clone())),
+        )
+    });
+    assert!(c_ttl >= 518_400, "contribution TTL must be extended, got {}", c_ttl);
+    assert!(t_ttl >= 518_400, "tokens-owed TTL must be extended, got {}", t_ttl);
+}
+
+// ═══════════════════════════════════════════════════════
+//  16. v8.1 ESCROW — D13 enforced: tokens are immutable while the raise is open
+// ═══════════════════════════════════════════════════════
+//
+// D13 promised `saldo_tokens_contrato == supply depositado (imutável até
+// close/fail)`, but v8 only banned withdraw/drain in CLOSED. During RAISING the
+// admin could pull the tokens that back every open claim, and close() would
+// still pay the company. The guard: once the Target is frozen and the raise is
+// open, sell_token cannot leave. It may leave BEFORE activation (Target == 0,
+// no trade possible) and AFTER fail() (refunds are USDC-only, tokens are idle).
+
+#[test]
+fn test_escrow_withdraw_banned_while_raising_after_activation() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, sell_token, _, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    assert_eq!(sale.try_withdraw(&sell_token.address, &(1 * U)), Err(Ok(SaleError::WrongState)));
+    // Nothing moved: the contract still holds the whole deposited supply.
+    assert_eq!(sell_token.balance(&sale.address), 1_000 * U);
+}
+
+#[test]
+fn test_escrow_withdraw_banned_while_raising_even_with_zero_trades() {
+    // Activation alone freezes the Target from the balance (D1) — pulling
+    // tokens after that desyncs Target from what backs it, trades or not.
+    let e = Env::default();
+    let (sale, _, _, _, _, sell_token, _, _, _) = setup_escrow(&e, 1_000);
+    assert_eq!(sale.try_withdraw(&sell_token.address, &(1 * U)), Err(Ok(SaleError::WrongState)));
+}
+
+#[test]
+#[should_panic(expected = "drain banned")]
+fn test_escrow_drain_banned_while_raising_after_activation() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    sale.emergency_drain();
+}
+
+#[test]
+fn test_escrow_withdraw_allowed_before_activation() {
+    // Boundary guard for the fix: Target == 0, no trade can happen, so the
+    // admin may still correct an over-deposit.
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    sale.create(
+        &admin, &admin, &sell_token.address, &buy_token.address,
+        &Address::generate(&e), &Address::generate(&e),
+        &(5 * U), &1, &1, &1_000, &0, &0, &1, &0,
+    );
+    sell_token_admin.mint(&admin, &(1_000 * U));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * U));
+    // not activated → Target still 0
+    sale.withdraw(&sell_token.address, &(100 * U));
+    assert_eq!(sell_token.balance(&sale_id), 900 * U);
+}
+
+#[test]
+fn test_escrow_withdraw_allowed_after_fail() {
+    // Boundary guard for the fix: after fail() the tokens back nothing —
+    // refunds are USDC — so the admin recovers the supply.
+    let e = Env::default();
+    let (sale, admin, buyer, _, _, sell_token, _, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    sale.fail();
+    sale.withdraw(&sell_token.address, &(1_000 * U));
+    assert_eq!(sell_token.balance(&admin), 1_000 * U);
+}
+
+// ═══════════════════════════════════════════════════════
+//  17. v8.1 ESCROW — D15 enforced: the admin can cancel an open raise
+// ═══════════════════════════════════════════════════════
+//
+// D15 listed "Admin cancela mid-raise → set_active(false) + fail() manual →
+// mesmos refunds" as a covered exit. It was not: fail() rejects before the
+// deadline (NotExpired), so a raise that had to be pulled (legal problem,
+// withdrawn offer) kept the investors' USDC locked until the deadline passed.
+// cancel() is the admin's exit: Raising → Failed at any time, opening the same
+// permissionless refunds. A fully subscribed raise cannot be cancelled — the
+// company is owed its close().
+
+#[test]
+fn test_escrow_cancel_by_admin_before_deadline_opens_refunds() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, buy_token, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    // Deadline (1_000) not reached: fail() is closed, cancel() is the exit.
+    assert_eq!(sale.try_fail(), Err(Ok(SaleError::NotExpired)));
+    sale.cancel();
+    assert_eq!(sale.get_raise().1, 2); // STATE_FAILED
+    sale.refund(&buyer);
+    // Principal back; the $5 fee stays with treasury (D10).
+    assert_eq!(buy_token.balance(&buyer), 2_000 * U - 5 * U);
+}
+
+#[test]
+fn test_escrow_cancel_rejected_when_fully_subscribed() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(1_000 * U));
+    assert_eq!(sale.try_cancel(), Err(Ok(SaleError::WrongState)));
+    sale.close(); // the only valid exit
+}
+
+#[test]
+fn test_escrow_cancel_idempotent_on_failed_and_blocks_trades() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    sale.cancel();
+    sale.cancel(); // no-op on Failed, like fail()
+    assert_eq!(sale.get_raise().1, 2);
+    // cancel() paused the sale…
+    assert_eq!(sale.try_trade(&buyer, &(1 * U)), Err(Ok(SaleError::NotActive)));
+    // …and even if the seller flips it back on, Failed is terminal (D12).
+    sale.set_active(&true);
+    assert_eq!(sale.try_trade(&buyer, &(1 * U)), Err(Ok(SaleError::WrongState)));
+}
+
+#[test]
+fn test_escrow_cancel_rejected_after_close() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(1_000 * U));
+    sale.close();
+    assert_eq!(sale.try_cancel(), Err(Ok(SaleError::WrongState)));
+}
+
+#[test]
+fn test_cancel_rejected_in_direct_mode() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    seed_offer(&e, &sale_id, &admin, &admin);
+    assert_eq!(sale.try_cancel(), Err(Ok(SaleError::WrongState)));
+}
+
+#[test]
+#[should_panic]
+fn test_auth_cancel_requires_admin_auth() {
+    let e = Env::default();
+    // NO mock_all_auths
+    let admin = Address::generate(&e);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    seed_offer(&e, &sale_id, &admin, &admin);
+    sale.cancel();
+}
+
+#[test]
+fn test_escrow_cancel_then_refund_then_admin_recovers_tokens() {
+    // The full unwind: money back to the investor, tokens back to the admin.
+    let e = Env::default();
+    let (sale, admin, buyer, _, _, sell_token, buy_token, _, _) = setup_escrow(&e, 1_000);
+    sale.trade(&buyer, &(100 * U));
+    sale.cancel();
+    sale.refund(&buyer);
+    sale.withdraw(&sell_token.address, &(1_000 * U));
+    assert_eq!(buy_token.balance(&buyer), 2_000 * U - 5 * U);
+    assert_eq!(sell_token.balance(&admin), 1_000 * U);
+    assert_eq!(sell_token.balance(&sale.address), 0);
+}
+
+// ═══════════════════════════════════════════════════════
+//  18. v9 ESCROW — piso do sponsor (min_raise), sobra da rodada parcial,
+//      upgrade travado com dinheiro dentro (decisão do Pedro, 23/08/2026)
+// ═══════════════════════════════════════════════════════
+
+/// Escrow com piso: 1.000 tokens a 1:1 (alvo = 1.000 USDC), fee zero (regra de
+/// 22/08: investidor não paga), `min_raise` em stroops de USDC.
+fn setup_escrow_floor<'a>(
+    e: &Env,
+    deadline: u32,
+    min_raise: i128,
+) -> (TokenSaleClient<'a>, Address, Address, Address, Address, token::Client<'a>, token::Client<'a>, token::StellarAssetClient<'a>, Address) {
+    e.mock_all_auths();
+    let admin = Address::generate(e);
+    let treasury = Address::generate(e);
+    let company = Address::generate(e);
+    let (sell_token, sell_token_admin) = create_token_contract(e, &admin);
+    let (buy_token, buy_token_admin) = create_token_contract(e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(e, &sale_id);
+    sale.create(
+        &admin, &admin, &sell_token.address, &buy_token.address, &treasury, &company,
+        &0, &1, &1, &deadline, &0, &0,
+        &1, // MODE_ESCROW
+        &min_raise,
+    );
+    let supply: i128 = 1_000 * U;
+    sell_token_admin.mint(&admin, &supply);
+    sell_token.transfer(&admin, &sale_id, &supply);
+    sale.set_active(&true);
+    let buyer = Address::generate(e);
+    buy_token_admin.mint(&buyer, &(2_000 * U));
+    (sale, admin, buyer, treasury, company, sell_token, buy_token, buy_token_admin, sale_id)
+}
+
+#[test]
+fn test_v9_floor_closes_at_deadline_when_raised_reaches_floor() {
+    let e = Env::default();
+    let (sale, _, buyer, _, company, sell_token, buy_token, _, _) = setup_escrow_floor(&e, 1_000, 400 * U);
+    sale.trade(&buyer, &(500 * U));
+    // Before the deadline the round keeps raising: neither close nor fail.
+    assert_eq!(sale.try_close(), Err(Ok(SaleError::TargetNotReached)));
+    assert_eq!(sale.try_fail(), Err(Ok(SaleError::NotExpired)));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    sale.close();
+    sale.close(); // idempotent
+    assert_eq!(sale.get_raise().1, 1, "Closed");
+    assert_eq!(buy_token.balance(&company), 500 * U, "company receives what was raised, not the target");
+    sale.claim_tokens(&buyer);
+    assert_eq!(sell_token.balance(&buyer), 500 * U);
+}
+
+#[test]
+fn test_v9_floor_fails_at_deadline_below_floor_and_refunds() {
+    let e = Env::default();
+    let (sale, _, buyer, _, company, _, buy_token, _, _) = setup_escrow_floor(&e, 1_000, 400 * U);
+    sale.trade(&buyer, &(300 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    assert_eq!(sale.try_close(), Err(Ok(SaleError::TargetNotReached)));
+    sale.fail();
+    sale.refund(&buyer);
+    assert_eq!(buy_token.balance(&buyer), 2_000 * U, "principal back in full (fee is zero)");
+    assert_eq!(buy_token.balance(&company), 0);
+}
+
+#[test]
+fn test_v9_floor_keeps_raising_between_floor_and_target_before_deadline() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow_floor(&e, 1_000, 400 * U);
+    sale.trade(&buyer, &(500 * U));
+    sale.trade(&buyer, &(100 * U)); // still open: every investor gets the full window
+    assert_eq!(sale.get_raise().3, 600 * U);
+}
+
+#[test]
+fn test_v9_full_subscription_closes_before_deadline_even_with_floor() {
+    let e = Env::default();
+    let (sale, _, buyer, _, company, _, buy_token, _, _) = setup_escrow_floor(&e, 1_000, 400 * U);
+    sale.trade(&buyer, &(1_000 * U));
+    sale.close();
+    assert_eq!(buy_token.balance(&company), 1_000 * U);
+}
+
+#[test]
+fn test_v9_cancel_rejected_once_round_is_closeable() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow_floor(&e, 1_000, 400 * U);
+    sale.trade(&buyer, &(500 * U));
+    sale.trade(&buyer, &(1 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    // Past the deadline and above the floor the investors own a closeable round.
+    assert_eq!(sale.try_cancel(), Err(Ok(SaleError::WrongState)));
+    sale.close();
+}
+
+#[test]
+fn test_v9_cancel_still_allowed_above_floor_before_deadline() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, buy_token, _, _) = setup_escrow_floor(&e, 1_000, 400 * U);
+    sale.trade(&buyer, &(500 * U));
+    sale.cancel();
+    sale.refund(&buyer);
+    assert_eq!(buy_token.balance(&buyer), 2_000 * U);
+}
+
+#[test]
+fn test_v9_partial_close_surplus_withdrawable_owed_tokens_retained() {
+    let e = Env::default();
+    let (sale, admin, buyer, _, _, sell_token, _, _, sale_id) = setup_escrow_floor(&e, 1_000, 400 * U);
+    sale.trade(&buyer, &(500 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    sale.close();
+    // 1.000 deposited, 500 owed to the buyer → 500 surplus, not one stroop more.
+    assert_eq!(sale.try_withdraw(&sell_token.address, &(501 * U)), Err(Ok(SaleError::ExceedsRemaining)));
+    sale.withdraw(&sell_token.address, &(500 * U));
+    assert_eq!(sell_token.balance(&admin), 500 * U);
+    assert_eq!(sell_token.balance(&sale_id), 500 * U, "the owed tokens never leave before claim");
+    assert_eq!(sale.try_withdraw(&sell_token.address, &(1 * U)), Err(Ok(SaleError::ExceedsRemaining)));
+    sale.claim_tokens(&buyer);
+    assert_eq!(sell_token.balance(&buyer), 500 * U);
+    assert_eq!(sell_token.balance(&sale_id), 0);
+}
+
+#[test]
+#[should_panic(expected = "drain banned")]
+fn test_v9_drain_banned_after_partial_close_while_tokens_owed() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow_floor(&e, 1_000, 400 * U);
+    sale.trade(&buyer, &(500 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    sale.close();
+    sale.emergency_drain();
+}
+
+#[test]
+fn test_v9_drain_returns_surplus_once_every_claim_is_paid() {
+    let e = Env::default();
+    let (sale, admin, buyer, _, _, sell_token, _, _, _) = setup_escrow_floor(&e, 1_000, 400 * U);
+    sale.trade(&buyer, &(500 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    sale.close();
+    sale.claim_tokens(&buyer);
+    sale.emergency_drain();
+    assert_eq!(sell_token.balance(&admin), 500 * U);
+}
+
+#[test]
+fn test_v9_upgrade_locked_while_investor_money_is_inside() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow_floor(&e, 1_000, 400 * U);
+    let hash = BytesN::from_array(&e, &[7u8; 32]);
+    // v9.1 (auditoria externa 23/08): a rodada ja esta ATIVADA (Target > 0) — mesmo vazia,
+    // trocar o codigo aqui capturaria as compras seguintes. Travado.
+    assert_eq!(sale.try_upgrade(&hash), Err(Ok(SaleError::WrongState)), "Raising activated, empty");
+    sale.trade(&buyer, &(100 * U));
+    assert_eq!(sale.try_upgrade(&hash), Err(Ok(SaleError::WrongState)), "Raising with principal held");
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    sale.fail();
+    assert_eq!(sale.try_upgrade(&hash), Err(Ok(SaleError::WrongState)), "Failed with refunds pending");
+    sale.refund(&buyer);
+    assert_ne!(sale.try_upgrade(&hash), Err(Ok(SaleError::WrongState)), "everything refunded");
+}
+
+#[test]
+fn test_v9_upgrade_locked_after_close_until_every_claim_is_paid() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow_floor(&e, 1_000, 400 * U);
+    let hash = BytesN::from_array(&e, &[7u8; 32]);
+    sale.trade(&buyer, &(500 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    sale.close();
+    assert_eq!(sale.try_upgrade(&hash), Err(Ok(SaleError::WrongState)), "Closed with tokens owed");
+    sale.claim_tokens(&buyer);
+    assert_ne!(sale.try_upgrade(&hash), Err(Ok(SaleError::WrongState)), "all claims paid");
+}
+
+#[test]
+fn test_v9_min_raise_above_target_rejected_at_activation() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    sale.create(
+        &admin, &admin, &sell_token.address, &buy_token.address,
+        &Address::generate(&e), &Address::generate(&e),
+        &0, &1, &1, &1_000, &0, &0, &1,
+        &(2_000 * U), // floor above anything the deposit can back
+    );
+    sell_token_admin.mint(&admin, &(1_000 * U));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * U));
+    assert_eq!(sale.try_set_active(&true), Err(Ok(SaleError::MinRaiseAboveTarget)));
+    assert_eq!(sale.get_raise().2, 0, "target not fixed, offer not activated");
+}
+
+#[test]
+fn test_v9_create_rejects_negative_floor_and_floor_in_direct_mode() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, _) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let sale = TokenSaleClient::new(&e, &e.register(TokenSale, ()));
+    let t = Address::generate(&e);
+    let c = Address::generate(&e);
+    assert_eq!(
+        sale.try_create(&admin, &admin, &sell_token.address, &buy_token.address, &t, &c, &0, &1, &1, &1_000, &0, &0, &1, &(-1)),
+        Err(Ok(SaleError::InvalidAmount))
+    );
+    assert_eq!(
+        sale.try_create(&admin, &admin, &sell_token.address, &buy_token.address, &t, &c, &0, &1, &1, &0, &0, &0, &0, &(10 * U)),
+        Err(Ok(SaleError::InvalidAmount)),
+        "direct mode has no round, so no floor"
+    );
+}
+
+#[test]
+fn test_v9_zero_floor_means_all_or_nothing() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow(&e, 1_000); // min_raise = 0
+    sale.trade(&buyer, &(999 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    assert_eq!(sale.try_close(), Err(Ok(SaleError::TargetNotReached)));
+    sale.fail();
+}
+
+#[test]
+fn test_v9_get_floor_view_tracks_floor_owed_and_held() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, _, _, _, _) = setup_escrow_floor(&e, 1_000, 400 * U);
+    assert_eq!(sale.get_floor(), (400 * U, 0, 0));
+    sale.trade(&buyer, &(500 * U));
+    assert_eq!(sale.get_floor(), (400 * U, 500 * U, 500 * U), "(floor, tokens owed, principal held)");
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    sale.close();
+    assert_eq!(sale.get_floor(), (400 * U, 500 * U, 0), "principal paid out at close");
+    sale.claim_tokens(&buyer);
+    assert_eq!(sale.get_floor(), (400 * U, 0, 0));
+}
+
+// ═══════════════════════════════════════════════════════
+//  19. v9.1 — achados da auditoria EXTERNA de direção (23/08/2026):
+//      comprador autorizado no SAC para entrar no escrow; upgrade travado desde a
+//      ativação; close() exige lastro de tokens para todos os claims.
+// ═══════════════════════════════════════════════════════
+
+
+/// Escrow com piso cujo token de venda tem as flags de um security token de verdade
+/// (AUTH_REQUIRED, AUTH_REVOCABLE, CLAWBACK_ENABLED — as mesmas do SAC na mainnet).
+/// O comprador nasce AUTORIZADO (como depois do sanduíche do backend).
+fn setup_escrow_floor_regulated<'a>(
+    e: &Env,
+    deadline: u32,
+    min_raise: i128,
+) -> (TokenSaleClient<'a>, Address, Address, Address, token::Client<'a>, token::StellarAssetClient<'a>, Address) {
+    use soroban_sdk::testutils::IssuerFlags;
+    e.mock_all_auths();
+    let admin = Address::generate(e);
+    let treasury = Address::generate(e);
+    let company = Address::generate(e);
+    let sell_sac = e.register_stellar_asset_contract_v2(admin.clone());
+    sell_sac.issuer().set_flag(IssuerFlags::RequiredFlag);
+    sell_sac.issuer().set_flag(IssuerFlags::RevocableFlag);
+    sell_sac.issuer().set_flag(IssuerFlags::ClawbackEnabledFlag);
+    let sell_token = token::Client::new(e, &sell_sac.address());
+    let sell_admin = token::StellarAssetClient::new(e, &sell_sac.address());
+    let (buy_token, buy_token_admin) = create_token_contract(e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(e, &sale_id);
+    sale.create(
+        &admin, &admin, &sell_sac.address(), &buy_token.address, &treasury, &company,
+        &0, &1, &1, &deadline, &0, &0, &1, &min_raise,
+    );
+    sell_admin.set_authorized(&sale_id, &true);
+    sell_admin.mint(&sale_id, &(1_000 * U));
+    sale.set_active(&true);
+    let buyer = Address::generate(e);
+    sell_admin.set_authorized(&buyer, &true);
+    buy_token_admin.mint(&buyer, &(2_000 * U));
+    (sale, admin, buyer, company, sell_token, sell_admin, sale_id)
+}
+
+#[test]
+fn test_v91_escrow_trade_requires_sac_authorized_buyer() {
+    let e = Env::default();
+    let (sale, _, buyer, _, _, sell_admin, _) = setup_escrow_floor_regulated(&e, 1_000, 400 * U);
+    // Carteira que o backend nunca autorizou (sem KYC) tenta entrar direto pelo RPC.
+    sell_admin.set_authorized(&buyer, &false);
+    assert_eq!(sale.try_trade(&buyer, &(100 * U)), Err(Ok(SaleError::BuyerNotAuthorized)));
+    assert_eq!(sale.get_raise().3, 0, "nada entrou na rodada");
+    // O sanduiche do backend autoriza antes da compra: passa.
+    sell_admin.set_authorized(&buyer, &true);
+    sale.trade(&buyer, &(100 * U));
+    assert_eq!(sale.get_raise().3, 100 * U);
+}
+
+#[test]
+fn test_v91_upgrade_allowed_only_before_activation_or_after_resolution() {
+    let e = Env::default();
+    e.mock_all_auths();
+    let admin = Address::generate(&e);
+    let (sell_token, sell_token_admin) = create_token_contract(&e, &admin);
+    let (buy_token, _) = create_token_contract(&e, &admin);
+    let sale_id = e.register(TokenSale, ());
+    let sale = TokenSaleClient::new(&e, &sale_id);
+    sale.create(
+        &admin, &admin, &sell_token.address, &buy_token.address,
+        &Address::generate(&e), &Address::generate(&e),
+        &0, &1, &1, &1_000, &0, &0, &1, &(400 * U),
+    );
+    let hash = BytesN::from_array(&e, &[7u8; 32]);
+    // Antes da ativacao nao ha rodada: o guard deixa passar (o host falha no hash
+    // desconhecido — isso NAO e o WrongState do contrato).
+    assert_ne!(sale.try_upgrade(&hash), Err(Ok(SaleError::WrongState)));
+    sell_token_admin.mint(&admin, &(1_000 * U));
+    sell_token.transfer(&admin, &sale_id, &(1_000 * U));
+    sale.set_active(&true);
+    assert_eq!(sale.try_upgrade(&hash), Err(Ok(SaleError::WrongState)), "ativada e vazia: travado");
+}
+
+#[test]
+fn test_v91_close_rejected_when_sell_balance_cannot_back_every_claim() {
+    let e = Env::default();
+    let (sale, _, buyer, _, sell_token, sell_admin, sale_id) = setup_escrow_floor_regulated(&e, 1_000, 400 * U);
+    sale.trade(&buyer, &(500 * U));
+    // Clawback do emissor no meio da rodada: ficam 400 tokens para 500 devidos.
+    sell_admin.clawback(&sale_id, &(600 * U));
+    e.ledger().with_mut(|li| li.sequence_number = 2_000);
+    assert_eq!(sale.try_close(), Err(Ok(SaleError::TokensShort)));
+    // Lastro reposto: fecha.
+    sell_admin.mint(&sale_id, &(100 * U));
+    sale.close();
+    sale.claim_tokens(&buyer);
+    assert_eq!(sell_token.balance(&buyer), 500 * U);
+}

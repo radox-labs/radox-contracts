@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+!.env.template
+**/target/
+**/.DS_Store
+*.pem
+*.key
+

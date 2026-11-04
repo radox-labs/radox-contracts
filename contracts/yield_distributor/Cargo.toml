@@ -1,0 +1,48 @@
+[package]
+name = "yield-distributor"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = "25.3.0"
+
+[dev-dependencies]
+soroban-sdk = { version = "25.3.0", features = ["testutils"] }
+# Test-only: lets the worst-case suite sign a real secp256r1 (P-256) signature
+# in-process so the mock passkey wallet's __check_auth runs genuine WebAuthn-grade
+# verification — no biometric/Touch ID needed. Pinned to the version already in
+# the lock file (transitive dep of soroban-env-host).
+p256 = { version = "0.13.2", features = ["ecdsa"] }
+
+[features]
+# Network feature gates (F-006 / security review — canonical USDC SAC hardcoded
+# per network, validated in distribute()). Default is `testing` so `cargo test`
+# works out of the box with generated SACs. WASM builds MUST pass
+# `--no-default-features --features testnet` or `--features mainnet`.
+default = ["testing"]
+testnet = []
+mainnet = []
+testing = []  # disables canonical-USDC validation for unit tests
+# Opt-in: runs the worst-case suite against the EXACT compiled mainnet WASM
+# (deploy/mainnet-wasm/yield_distributor.wasm) for true VM-accurate CPU/memory
+# numbers. Off by default so a plain `cargo test` never depends on that artifact.
+#   cargo test --features wasm-tests worst_case_30_investors_fits_mainnet_wasm -- --nocapture
+wasm-tests = []
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

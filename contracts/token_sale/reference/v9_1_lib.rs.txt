@@ -1,0 +1,1004 @@
+#![no_std]
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, String,
+};
+
+// v7 (May 2026, F-006 security audit follow-up): canonical USDC SAC is now
+// hardcoded per network and validated at create(). Prevents address-poisoning
+// attacks where a malicious or compromised admin could deploy an offer
+// pointing to a fake USDC SAC. The `testing` feature disables the check so
+// unit tests can use generated SACs; production WASMs are built with
+// `--no-default-features --features testnet|mainnet`.
+// v8 (Aug 2026, escada 7.2): escrow / all-or-nothing raise mode. Product rule
+// (Pedro 2026-08-13): an offer must NOT fund partially. In escrow mode the
+// principal is HELD by this contract and only released to the company when the
+// raise fully subscribes (close()); a raise that expires below target opens
+// permissionless USDC refunds. Design doc: docs/Tecnologia/archive/ESCROW_V8_DESIGN_2026-08-14.md
+// (decisions D1-D15). Direct mode preserves v7 behavior byte-for-byte.
+// v9 (23 Aug 2026): the sponsor sets a FLOOR (`min_raise`): past the deadline the
+// round closes at/above it and fails below it; full subscription closes any time;
+// a partial close leaves a token SURPLUS the admin may withdraw while the owed
+// tokens wait for claim; `upgrade()` is refused while principal or claims are
+// inside. Floor 0 keeps the v8 all-or-nothing semantics.
+const CONTRACT_VERSION: u32 = 9;
+
+// Raise lifecycle states (escrow mode only) — stored as u32 for upgrade safety.
+const STATE_RAISING: u32 = 0;
+const STATE_CLOSED: u32 = 1;
+const STATE_FAILED: u32 = 2;
+
+// Raise modes — create() arg. Direct = v7 pass-through (default for instances
+// born on v7 and upgraded in place: missing key reads as 0).
+const MODE_DIRECT: u32 = 0;
+const MODE_ESCROW: u32 = 1;
+// ~30 days at 5s per ledger
+const TTL_THRESHOLD: u32 = 518_400;
+const TTL_EXTEND: u32 = 518_400;
+
+// Canonical USDC Stellar Asset Contract — F-006.
+// IMPORTANT: when changing, also update docs/Operations/DEPLOYMENTS.md.
+#[cfg(feature = "testnet")]
+const USDC_SAC: &str = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
+
+// Mainnet USDC SAC — verified 2026-05-29 against:
+//   - Stellar Docs (x402): https://developers.stellar.org/docs/build/agentic-payments/x402
+//   - Issuer GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN (Circle)
+//   - CLI: stellar contract id asset --asset USDC:GA5ZS... --network mainnet
+#[cfg(feature = "mainnet")]
+const USDC_SAC: &str = "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75";
+
+// PEND 159 (23/08): a escolha de rede e exclusiva e obrigatoria. `testing` (default do
+// `cargo test`) DESLIGA a validacao do USDC canonico — combinada com `testnet`/`mainnet`
+// ela produz um WASM de producao sem o gate F-006. O build correto e sempre
+// `--no-default-features --features testnet|mainnet`; qualquer outra combinacao nao compila.
+#[cfg(all(feature = "testing", any(feature = "testnet", feature = "mainnet")))]
+compile_error!("feature `testing` junto com `testnet`/`mainnet`: use --no-default-features --features testnet|mainnet");
+#[cfg(all(feature = "testnet", feature = "mainnet"))]
+compile_error!("features `testnet` e `mainnet` sao mutuamente exclusivas");
+#[cfg(not(any(feature = "testing", feature = "testnet", feature = "mainnet")))]
+compile_error!("escolha uma rede: --features testnet|mainnet (ou o default `testing` para cargo test)");
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum SaleError {
+    AlreadyCreated = 1,
+    ZeroPrice = 2,
+    NotActive = 3,
+    InvalidAmount = 4,
+    TradeTooSmall = 5,
+    Overflow = 6,
+    Expired = 7,
+    BelowMinimum = 8,
+    BuyerCapExceeded = 9,
+    BuyerBlocked = 10,
+    NoPendingAdmin = 11,
+    NotPendingAdmin = 12,
+    InsufficientForFee = 13,
+    /// v7 (F-006): supplied buy_token is not the canonical USDC SAC for this network
+    UnauthorizedToken = 14,
+    /// v8: operation not valid in the current raise state (D12 state machine)
+    WrongState = 15,
+    /// v8: close() before Raised == Target
+    TargetNotReached = 16,
+    /// v8 (D4): escrow mode requires a real deadline_ledger — without one the
+    /// failure condition never fires and refunds never open
+    DeadlineRequired = 17,
+    /// v8 (D1): buy would overshoot the remaining target
+    ExceedsRemaining = 18,
+    /// v8: refund/claim with nothing recorded for this buyer
+    NothingToClaim = 19,
+    /// v8 (D6): price is immutable once the escrow target is computed
+    PriceLocked = 20,
+    /// v8: fail() before the deadline has passed
+    NotExpired = 21,
+    MinRaiseAboveTarget = 22,
+    BuyerNotAuthorized = 23,
+    TokensShort = 24,
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub enum DataKey {
+    Offer,
+    PendingAdmin,
+    BuyerSpent(Address),
+    BuyerBlocked(Address),
+    // v8 (D9 — the brick rule): the `Offer` struct above is IMMUTABLE across
+    // upgrades (`load_offer().unwrap()` panics on a layout change, including
+    // inside upgrade() itself). ALL new state lives in NEW variants APPENDED
+    // here; appending is safe, reordering or inserting mid-enum is NOT.
+    RaiseMode,             // u32 (MODE_*) — instance; missing = MODE_DIRECT
+    RaiseTarget,           // i128 buy_token stroops — instance; set at first activation
+    RaiseRaised,           // i128 buy_token stroops — instance
+    SaleState,             // u32 (STATE_*) — instance; missing = STATE_RAISING
+    Contribution(Address), // i128 principal escrowed per buyer — persistent
+    TokensOwed(Address),   // i128 sell tokens claimable post-close — persistent
+    MinRaise,   // i128 buy_token stroops — instance; v9 floor (0 = all-or-nothing)
+    TotalOwed,  // i128 sell tokens still claimable — instance; v9
+    Held,       // i128 principal held for investors — instance; v9
+}
+
+/// Represents a single token sale offer.
+///
+/// Two-role access control:
+/// - `admin`: cold key / multisig — controls upgrade, withdraw, drain, freeze, admin transfer, fee updates
+/// - `seller`: hot key — controls pause, price updates (day-to-day operations)
+///
+/// Additive fee model: Investor pays buy_amount + fixed_fee. Company receives the
+/// full buy_amount (100% capital); treasury receives fixed_fee on top.
+/// (Investor paying $100 of tokens + $5 fee pulls $105; company gets $100.)
+/// ```text
+///   Investor ──$105──▶ trade()
+///                        ├── buy_amount ($100) → company (full capital)
+///                        └── fixed_fee  ($5)   → treasury (processing fee, on top)
+/// ```
+/// - `fixed_fee = 50_000_000`: $5 USDC per trade (1 USDC = 10^7 stroops)
+/// - `fixed_fee = 0`:          no fee, investor pays only buy_amount
+///
+/// Compliance fields:
+/// - `deadline_ledger`: sale closes after this ledger (0 = no deadline)
+/// - `min_buy_amount`: minimum trade size in stroops (0 = no minimum)
+/// - `max_buy_per_buyer`: cumulative cap per buyer in stroops (0 = no cap)
+#[contracttype]
+#[derive(Clone)]
+pub struct Offer {
+    pub admin: Address,
+    pub seller: Address,
+    pub sell_token: Address,
+    pub buy_token: Address,
+    pub treasury: Address,
+    pub company: Address,
+    pub fixed_fee: i128,
+    pub sell_price: u32,
+    pub buy_price: u32,
+    pub is_active: bool,
+    pub deadline_ledger: u32,
+    pub min_buy_amount: i128,
+    pub max_buy_per_buyer: i128,
+}
+
+#[contract]
+pub struct TokenSale;
+
+/// Emit helper — wraps the deprecated API with a suppression.
+/// When soroban-sdk stabilizes #[contractevent], migrate these calls.
+#[allow(deprecated)]
+fn emit<D: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
+    e: &Env,
+    topic: soroban_sdk::Symbol,
+    data: D,
+) {
+    e.events().publish((topic,), data);
+}
+
+/// v7 (F-006) — verify the supplied buy_token matches the canonical USDC
+/// SAC for this network. In `testing` feature builds the check is a no-op
+/// so unit tests can use generated SACs. Production builds (testnet /
+/// mainnet feature) enforce the check.
+#[allow(unused_variables)]
+fn validate_canonical_usdc(env: &Env, buy_token: &Address) -> Result<(), SaleError> {
+    #[cfg(not(feature = "testing"))]
+    {
+        let canonical = Address::from_string(&String::from_str(env, USDC_SAC));
+        if *buy_token != canonical {
+            return Err(SaleError::UnauthorizedToken);
+        }
+    }
+    Ok(())
+}
+
+#[contractimpl]
+impl TokenSale {
+    /// Creates the offer. Must be called once.
+    /// Starts INACTIVE — seller must call set_active(true) after deposit + SAC setup.
+    ///
+    /// `admin`: high-privilege key (upgrade, withdraw, drain, freeze). Ideally multisig/cold.
+    /// `seller`: operational key (pause, price). Can be same as admin for MVP.
+    /// `fixed_fee`: flat fee per trade in stroops (e.g., 50_000_000 = $5 USDC). 0 = no fee.
+    /// `deadline_ledger`: ledger sequence after which trades are rejected (0 = no deadline).
+    /// `min_buy_amount`: minimum buy_token amount per trade in stroops (0 = no minimum).
+    /// `max_buy_per_buyer`: cumulative buy_token cap per buyer in stroops (0 = no cap).
+    pub fn create(
+        e: Env,
+        admin: Address,
+        seller: Address,
+        sell_token: Address,
+        buy_token: Address,
+        treasury: Address,
+        company: Address,
+        fixed_fee: i128,
+        sell_price: u32,
+        buy_price: u32,
+        deadline_ledger: u32,
+        min_buy_amount: i128,
+        max_buy_per_buyer: i128,
+        raise_mode: u32,
+        min_raise: i128,
+    ) -> Result<(), SaleError> {
+        if e.storage().instance().has(&DataKey::Offer) {
+            return Err(SaleError::AlreadyCreated);
+        }
+        if buy_price == 0 || sell_price == 0 {
+            return Err(SaleError::ZeroPrice);
+        }
+        if fixed_fee < 0 {
+            return Err(SaleError::InvalidAmount);
+        }
+        if raise_mode > MODE_ESCROW {
+            return Err(SaleError::InvalidAmount);
+        }
+        // v9 (Pedro, 23/08/2026): the sponsor sets the FLOOR of the round in buy_token
+        // stroops. Past the deadline the round closes if raised >= floor, fails below
+        // it; full subscription closes at any time. 0 = floor equals the target
+        // (all-or-nothing). Direct mode has no round, hence no floor.
+        if min_raise < 0 || (raise_mode == MODE_DIRECT && min_raise != 0) {
+            return Err(SaleError::InvalidAmount);
+        }
+        // v8 (D4): escrow without a deadline is a trap — money enters, the
+        // target never closes, and no event ever authorizes giving it back.
+        if raise_mode == MODE_ESCROW && deadline_ledger == 0 {
+            return Err(SaleError::DeadlineRequired);
+        }
+        // v7 (F-006): enforce canonical USDC SAC at create() — prevents
+        // address-poisoning by a malicious or compromised admin.
+        validate_canonical_usdc(&e, &buy_token)?;
+        admin.require_auth();
+        e.storage().instance().set(&DataKey::RaiseMode, &raise_mode);
+        if raise_mode == MODE_ESCROW {
+            e.storage().instance().set(&DataKey::SaleState, &STATE_RAISING);
+            e.storage().instance().set(&DataKey::RaiseRaised, &0i128);
+            e.storage().instance().set(&DataKey::MinRaise, &min_raise);
+            e.storage().instance().set(&DataKey::Held, &0i128);
+            e.storage().instance().set(&DataKey::TotalOwed, &0i128);
+        }
+        write_offer(
+            &e,
+            &Offer {
+                admin,
+                seller,
+                sell_token,
+                buy_token,
+                treasury,
+                company,
+                fixed_fee,
+                sell_price,
+                buy_price,
+                is_active: false,
+                deadline_ledger,
+                min_buy_amount,
+                max_buy_per_buyer,
+            },
+        );
+        Ok(())
+    }
+
+    /// Buyer trades buy_token (USDC) for sell_token.
+    /// Enforces: active, deadline, min amount, per-buyer cap, buyer not frozen.
+    /// Atomic: all transfers succeed or all revert.
+    /// REENTRANCY SAFETY (do not reorder writes vs. transfers): Soroban's
+    /// host is single-threaded and cross-contract calls cannot re-enter the
+    /// caller, but this function ALSO follows checks-effects-interactions —
+    /// all state writes land before the external token transfers. If you edit
+    /// this function, keep that ordering: a transfer before its paired state
+    /// write reintroduces a double-spend window under any future host
+    /// semantics change. (Documented in-source per audit 2026-07-16.)
+    pub fn trade(e: Env, buyer: Address, buy_token_amount: i128) -> Result<(), SaleError> {
+        buyer.require_auth();
+        if buy_token_amount <= 0 {
+            return Err(SaleError::InvalidAmount);
+        }
+
+        let offer = load_offer(&e);
+        if !offer.is_active {
+            return Err(SaleError::NotActive);
+        }
+
+        let mode = raise_mode(&e);
+        let mut escrow_remaining: i128 = 0;
+        if mode == MODE_ESCROW {
+            // D12: trades only while Raising; D1: never past the target.
+            if sale_state(&e) != STATE_RAISING {
+                return Err(SaleError::WrongState);
+            }
+            let target = raise_target(&e);
+            if target == 0 {
+                // Activated without deposit — nothing to sell against.
+                return Err(SaleError::WrongState);
+            }
+            escrow_remaining = target - raise_raised(&e);
+            if buy_token_amount > escrow_remaining {
+                return Err(SaleError::ExceedsRemaining);
+            }
+        }
+
+        // Deadline check
+        if offer.deadline_ledger > 0 && e.ledger().sequence() > offer.deadline_ledger {
+            return Err(SaleError::Expired);
+        }
+
+        // Min investment check — D7: the purchase that CLOSES the round is
+        // exempt (buy == remaining below the minimum), otherwise ordinary
+        // arithmetic strands a sub-minimum tail and the round only closes by luck.
+        let closes_round = mode == MODE_ESCROW && buy_token_amount == escrow_remaining;
+        if offer.min_buy_amount > 0 && buy_token_amount < offer.min_buy_amount && !closes_round {
+            return Err(SaleError::BelowMinimum);
+        }
+
+        // Buyer blocklist check
+        if is_buyer_blocked(&e, &buyer) {
+            return Err(SaleError::BuyerBlocked);
+        }
+        // v9.1 (auditoria externa 23/08): in direct mode the token transfer at trade
+        // time already enforces the SAC authorization; in escrow the delivery moved to
+        // claim_tokens(), so without this check any wallet with USDC could enter the
+        // round by RPC, count toward the floor, and the company would receive money
+        // from a buyer the backend never KYC'd. The authorization sandwich authorizes
+        // the buyer BEFORE the purchase, so legitimate trades pass.
+        if mode == MODE_ESCROW
+            && !token::StellarAssetClient::new(&e, &offer.sell_token).authorized(&buyer)
+        {
+            return Err(SaleError::BuyerNotAuthorized);
+        }
+
+        // Per-buyer cap check. The ledger is written UNCONDITIONALLY — even
+        // while the offer is uncapped — because updt_terms can introduce a cap
+        // later. Recording only while a cap existed (the v7 behaviour, safe
+        // only because the cap was write-once at create()) would restart the
+        // "cumulative" total at zero for everyone who already bought: set a
+        // 50 USDC concentration limit on an offer where someone already took
+        // 400, and their next 50 sails through at 450/50. That is precisely
+        // what a cap exists to stop. Also the unconditional spend ledger
+        // PENDENCIAS 111 asked for. Cost: one persistent write per uncapped
+        // trade.
+        let spent = get_buyer_spent(&e, &buyer);
+        let new_total = spent
+            .checked_add(buy_token_amount)
+            .ok_or(SaleError::Overflow)?;
+        if offer.max_buy_per_buyer > 0 && new_total > offer.max_buy_per_buyer {
+            return Err(SaleError::BuyerCapExceeded);
+        }
+        set_buyer_spent(&e, &buyer, new_total);
+
+        let sell_token_client = token::Client::new(&e, &offer.sell_token);
+        let buy_token_client = token::Client::new(&e, &offer.buy_token);
+
+        let sell_token_amount = buy_token_amount
+            .checked_mul(offer.sell_price as i128)
+            .ok_or(SaleError::Overflow)?
+            .checked_div(offer.buy_price as i128)
+            .ok_or(SaleError::Overflow)?;
+
+        if sell_token_amount <= 0 {
+            return Err(SaleError::TradeTooSmall);
+        }
+
+        let contract = e.current_contract_address();
+
+        // Fee is additive: investor pays buy_token_amount + fixed_fee
+        let fee = offer.fixed_fee;
+        let total_pull = buy_token_amount
+            .checked_add(fee)
+            .ok_or(SaleError::Overflow)?;
+
+        if mode == MODE_ESCROW {
+            // v8 escrow (D8/D10/D13): principal is HELD by the contract and the
+            // tokens are RETAINED (the authorization sandwich revokes buyers
+            // post-purchase, so tokens could never come back for a refund —
+            // they only leave at claim_tokens() after close()). The fee is
+            // OPERATING COST recovery, not a success fee (Pedro 2026-08-14):
+            // it pays for work already done, so it goes to treasury NOW and is
+            // not refunded on failure.
+            // Checks-effects-interactions: state writes before transfers.
+            set_contribution(&e, &buyer, get_contribution(&e, &buyer)
+                .checked_add(buy_token_amount).ok_or(SaleError::Overflow)?);
+            // Owed tokens accumulate the PER-TRADE floor amounts — recomputing
+            // from the total at claim time would round differently (Σfloor ≠
+            // floor Σ) and desync the contract's token balance from its claims.
+            set_tokens_owed(&e, &buyer, get_tokens_owed(&e, &buyer)
+                .checked_add(sell_token_amount).ok_or(SaleError::Overflow)?);
+            let raised = raise_raised(&e)
+                .checked_add(buy_token_amount).ok_or(SaleError::Overflow)?;
+            e.storage().instance().set(&DataKey::RaiseRaised, &raised);
+            set_held(&e, held(&e).checked_add(buy_token_amount).ok_or(SaleError::Overflow)?);
+            set_total_owed(&e, total_owed(&e).checked_add(sell_token_amount).ok_or(SaleError::Overflow)?);
+
+            buy_token_client.transfer(&buyer, &contract, &total_pull);
+            if fee > 0 {
+                buy_token_client.transfer(&contract, &offer.treasury, &fee);
+            }
+        } else {
+            // v7 direct mode — unchanged.
+            // Atomic: if any transfer fails, all revert (Soroban guarantee)
+            // Pull investment + fee from buyer in a single transfer
+            buy_token_client.transfer(&buyer, &contract, &total_pull);
+            // Tokens calculated on buy_token_amount only (not including fee)
+            sell_token_client.transfer(&contract, &buyer, &sell_token_amount);
+
+            // Company gets full investment amount, treasury gets fee
+            buy_token_client.transfer(&contract, &offer.company, &buy_token_amount);
+            if fee > 0 {
+                buy_token_client.transfer(&contract, &offer.treasury, &fee);
+            }
+        }
+
+        emit(
+            &e,
+            symbol_short!("trade"),
+            (buyer, buy_token_amount, sell_token_amount, fee, e.ledger().sequence(), CONTRACT_VERSION),
+        );
+
+        e.storage().instance().extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════
+    // v8 escrow lifecycle (D2/D3/D8/D12)
+    // ═══════════════════════════════════════════
+
+    /// Close a fully subscribed escrow raise: principal → company, state →
+    /// Closed. PERMISSIONLESS by design (D2): a pure function of state — no
+    /// human has discretion over the release, which is both the legal posture
+    /// ("custody without discretion") and what keeps the closing purchase
+    /// cheap. Idempotent: closing a Closed raise is a no-op.
+    pub fn close(e: Env) -> Result<(), SaleError> {
+        let offer = load_offer(&e);
+        if raise_mode(&e) != MODE_ESCROW {
+            return Err(SaleError::WrongState);
+        }
+        let state = sale_state(&e);
+        if state == STATE_CLOSED {
+            return Ok(()); // idempotent (D15)
+        }
+        if state != STATE_RAISING {
+            return Err(SaleError::WrongState);
+        }
+        if !closeable(&e, &offer) {
+            return Err(SaleError::TargetNotReached);
+        }
+        // v9.1: every claim must be backed before the money leaves — a clawback by
+        // the issuer mid-round would otherwise close the round and strand claims.
+        let sell_balance =
+            token::Client::new(&e, &offer.sell_token).balance(&e.current_contract_address());
+        if sell_balance < total_owed(&e) {
+            return Err(SaleError::TokensShort);
+        }
+        let raised = raise_raised(&e);
+        // Effects before interaction.
+        e.storage().instance().set(&DataKey::SaleState, &STATE_CLOSED);
+        set_held(&e, 0);
+        let mut o = offer.clone();
+        o.is_active = false;
+        write_offer(&e, &o);
+        // D13: exactly Target leaves (fees left at trade time); retained sell
+        // tokens stay behind, backing the unclaimed claims.
+        token::Client::new(&e, &offer.buy_token).transfer(
+            &e.current_contract_address(),
+            &offer.company,
+            &raised,
+        );
+        emit(&e, symbol_short!("close"), (raised, e.ledger().sequence()));
+        Ok(())
+    }
+
+    /// Mark an expired, under-subscribed escrow raise as Failed, opening
+    /// refunds. PERMISSIONLESS: only possible after the deadline with the
+    /// target unmet. Idempotent on Failed.
+    pub fn fail(e: Env) -> Result<(), SaleError> {
+        let offer = load_offer(&e);
+        if raise_mode(&e) != MODE_ESCROW {
+            return Err(SaleError::WrongState);
+        }
+        let state = sale_state(&e);
+        if state == STATE_FAILED {
+            return Ok(()); // idempotent (D15)
+        }
+        if state != STATE_RAISING {
+            return Err(SaleError::WrongState);
+        }
+        if e.ledger().sequence() <= offer.deadline_ledger {
+            return Err(SaleError::NotExpired);
+        }
+        if closeable(&e, &offer) {
+            // Closeable (full, or past the deadline at/above the floor) — the
+            // investors own a round that closes; the only valid exit is close().
+            return Err(SaleError::WrongState);
+        }
+        e.storage().instance().set(&DataKey::SaleState, &STATE_FAILED);
+        let mut o = offer.clone();
+        o.is_active = false;
+        write_offer(&e, &o);
+        emit(&e, symbol_short!("fail"), (raise_raised(&e), e.ledger().sequence()));
+        Ok(())
+    }
+
+    /// v8.1 (D15): the admin pulls an OPEN raise before its deadline —
+    /// withdrawn offer, legal hold, anything that must not wait for the
+    /// deadline to pass. Raising → Failed, opening the same permissionless
+    /// refund() path as fail(). A fully subscribed raise cannot be cancelled:
+    /// the company is owed its close(). Idempotent on Failed.
+    pub fn cancel(e: Env) -> Result<(), SaleError> {
+        let offer = load_offer(&e);
+        offer.admin.require_auth();
+        if raise_mode(&e) != MODE_ESCROW {
+            return Err(SaleError::WrongState);
+        }
+        let state = sale_state(&e);
+        if state == STATE_FAILED {
+            return Ok(()); // idempotent
+        }
+        if state != STATE_RAISING {
+            return Err(SaleError::WrongState);
+        }
+        if closeable(&e, &offer) {
+            // The investors already own a closeable round — admin cannot undo it.
+            return Err(SaleError::WrongState);
+        }
+        e.storage().instance().set(&DataKey::SaleState, &STATE_FAILED);
+        let mut o = offer.clone();
+        o.is_active = false;
+        write_offer(&e, &o);
+        emit(&e, symbol_short!("cancel"), (raise_raised(&e), e.ledger().sequence()));
+        Ok(())
+    }
+
+    /// Refund a buyer's escrowed PRINCIPAL after a failed raise. Anyone may
+    /// trigger it — the USDC can only go to the recorded buyer, so allowing
+    /// third-party triggers lets the backend sweep refunds for users without
+    /// weakening anything (D3). The fee is NOT refunded (D10: it paid for
+    /// operating costs already incurred). USDC carries no authorization
+    /// sandwich, so this path is fully permissionless.
+    pub fn refund(e: Env, buyer: Address) -> Result<(), SaleError> {
+        let offer = load_offer(&e);
+        if raise_mode(&e) != MODE_ESCROW || sale_state(&e) != STATE_FAILED {
+            return Err(SaleError::WrongState);
+        }
+        if is_buyer_blocked(&e, &buyer) {
+            return Err(SaleError::BuyerBlocked); // compliance hold (D8)
+        }
+        let principal = get_contribution(&e, &buyer);
+        if principal <= 0 {
+            return Err(SaleError::NothingToClaim);
+        }
+        // Effects before interaction; owed tokens never left the contract and
+        // are simply released back to admin via withdraw/drain later.
+        let owed = get_tokens_owed(&e, &buyer);
+        set_contribution(&e, &buyer, 0);
+        set_tokens_owed(&e, &buyer, 0);
+        set_held(&e, held(&e) - principal);
+        set_total_owed(&e, total_owed(&e) - owed);
+        token::Client::new(&e, &offer.buy_token).transfer(
+            &e.current_contract_address(),
+            &buyer,
+            &principal,
+        );
+        emit(&e, symbol_short!("refund"), (buyer, principal, e.ledger().sequence()));
+        Ok(())
+    }
+
+    /// Deliver a buyer's tokens after a successful close. Anyone may trigger;
+    /// tokens can only go to the recorded buyer. The backend orchestrates the
+    /// authorization sandwich around this call (authorize → claim → revoke),
+    /// exactly the dance every purchase does today, moved to the closing.
+    pub fn claim_tokens(e: Env, buyer: Address) -> Result<(), SaleError> {
+        let offer = load_offer(&e);
+        if raise_mode(&e) != MODE_ESCROW || sale_state(&e) != STATE_CLOSED {
+            return Err(SaleError::WrongState);
+        }
+        if is_buyer_blocked(&e, &buyer) {
+            return Err(SaleError::BuyerBlocked);
+        }
+        let owed = get_tokens_owed(&e, &buyer);
+        if owed <= 0 {
+            return Err(SaleError::NothingToClaim);
+        }
+        set_tokens_owed(&e, &buyer, 0);
+        set_total_owed(&e, total_owed(&e) - owed);
+        token::Client::new(&e, &offer.sell_token).transfer(
+            &e.current_contract_address(),
+            &buyer,
+            &owed,
+        );
+        emit(&e, symbol_short!("claim"), (buyer, owed, e.ledger().sequence()));
+        Ok(())
+    }
+
+    /// Raise snapshot: (mode, state, target, raised). One query for backend
+    /// reconcilers and the admin panel.
+    pub fn get_raise(e: Env) -> (u32, u32, i128, i128) {
+        (raise_mode(&e), sale_state(&e), raise_target(&e), raise_raised(&e))
+    }
+
+    /// Per-buyer escrow record: (escrowed principal, claimable tokens).
+    pub fn get_escrow_of(e: Env, buyer: Address) -> (i128, i128) {
+        (get_contribution(&e, &buyer), get_tokens_owed(&e, &buyer))
+    }
+
+    /// v9: (floor in buy_token stroops, sell tokens still owed to buyers,
+    /// principal still held for buyers). Both "inside" figures must be zero
+    /// before `upgrade()` is allowed.
+    pub fn get_floor(e: Env) -> (i128, i128, i128) {
+        (min_raise(&e), total_owed(&e), held(&e))
+    }
+
+    /// Admin withdraws SELL TOKENS from the contract.
+    /// v8 (D5): restricted to sell_token — with escrow, an arbitrary-token
+    /// withdraw would be an admin drain over investor money (the exact bomb
+    /// the 2026-07-16 audit described on this function). v8.1 (D13): banned
+    /// from the first activation (Target frozen) until the raise resolves, and
+    /// for good in Closed — the retained tokens back every open claim. Allowed
+    /// before activation and after fail().
+    pub fn withdraw(e: Env, token: Address, amount: i128) -> Result<(), SaleError> {
+        let offer = load_offer(&e);
+        offer.admin.require_auth();
+        if amount <= 0 {
+            return Err(SaleError::InvalidAmount);
+        }
+        if token != offer.sell_token {
+            return Err(SaleError::UnauthorizedToken);
+        }
+        if raise_mode(&e) == MODE_ESCROW {
+            let state = sale_state(&e);
+            if state == STATE_RAISING && raise_target(&e) > 0 {
+                return Err(SaleError::WrongState); // tokens back the open round
+            }
+            if state == STATE_CLOSED {
+                // v9: a partial close leaves a SURPLUS (deposit - tokens owed);
+                // only that may leave — the owed tokens wait for claim_tokens().
+                let balance = token::Client::new(&e, &token).balance(&e.current_contract_address());
+                if amount > balance - total_owed(&e) {
+                    return Err(SaleError::ExceedsRemaining);
+                }
+            }
+        }
+        token::Client::new(&e, &token).transfer(
+            &e.current_contract_address(),
+            &offer.admin,
+            &amount,
+        );
+        emit(&e, symbol_short!("wdrw"), (token, amount, e.ledger().sequence()));
+        Ok(())
+    }
+
+    /// Emergency drain: atomically pauses the sale AND withdraws all sell_token to admin.
+    /// Admin only. For the "oh shit" scenario.
+    /// v8.1 (D13): banned while the raise is open (Target frozen) and in
+    /// Closed — the retained sell tokens back the claims. Failed and
+    /// pre-activation remain valid: there the tokens back nothing, and investor
+    /// MONEY only ever moves through refund().
+    pub fn emergency_drain(e: Env) {
+        let mut offer = load_offer(&e);
+        offer.admin.require_auth();
+        if sell_tokens_locked(&e) {
+            panic!("drain banned: the retained sell tokens back an open or closed raise");
+        }
+
+        // Pause
+        offer.is_active = false;
+        write_offer(&e, &offer);
+
+        // Drain all sell_token
+        let sell_client = token::Client::new(&e, &offer.sell_token);
+        let balance = sell_client.balance(&e.current_contract_address());
+        if balance > 0 {
+            sell_client.transfer(&e.current_contract_address(), &offer.admin, &balance);
+        }
+
+        emit(&e, symbol_short!("drain"), (balance, e.ledger().sequence()));
+    }
+
+    /// Pause or resume the sale. Seller only.
+    /// v8 (D1): in escrow mode the FIRST activation freezes the Target from the
+    /// deposited supply — Target = balance × buy_price / sell_price (the exact
+    /// inverse of trade()'s token math; 1:1 house pricing makes it exact).
+    pub fn set_active(e: Env, active: bool) -> Result<(), SaleError> {
+        let mut offer = load_offer(&e);
+        offer.seller.require_auth();
+        if active && raise_mode(&e) == MODE_ESCROW && raise_target(&e) == 0 {
+            let balance =
+                token::Client::new(&e, &offer.sell_token).balance(&e.current_contract_address());
+            let target = balance * (offer.buy_price as i128) / (offer.sell_price as i128);
+            // v9: a floor the deposit cannot back would make the round unclosable.
+            if min_raise(&e) > target {
+                return Err(SaleError::MinRaiseAboveTarget);
+            }
+            e.storage().instance().set(&DataKey::RaiseTarget, &target);
+            emit(&e, symbol_short!("target"), (target, e.ledger().sequence()));
+        }
+        offer.is_active = active;
+        write_offer(&e, &offer);
+        emit(&e, symbol_short!("status"), (active, e.ledger().sequence()));
+        Ok(())
+    }
+
+    /// Update price. Seller only. Emits "price" event.
+    /// v8 (D6): immutable once the escrow target is computed — a mid-raise
+    /// price change re-values the remaining tokens and desyncs Target/Raised.
+    pub fn updt_price(e: Env, sell_price: u32, buy_price: u32) -> Result<(), SaleError> {
+        if buy_price == 0 || sell_price == 0 {
+            return Err(SaleError::ZeroPrice);
+        }
+        if raise_mode(&e) == MODE_ESCROW && raise_target(&e) > 0 {
+            return Err(SaleError::PriceLocked);
+        }
+        let mut offer = load_offer(&e);
+        offer.seller.require_auth();
+        offer.sell_price = sell_price;
+        offer.buy_price = buy_price;
+        write_offer(&e, &offer);
+        emit(&e, symbol_short!("price"), (sell_price, buy_price, e.ledger().sequence()));
+        Ok(())
+    }
+
+    /// Update the commercial terms of a live offer: minimum ticket, cumulative
+    /// per-buyer cap (0 = uncapped) and the additive processing fee.
+    /// Seller only. Emits "terms" event.
+    ///
+    /// These were write-once at `create()` until now, so a wrong number meant
+    /// tearing the offer down and redeploying it — with the supply already
+    /// escrowed in the contract, that is a far riskier operation than a signed
+    /// setter (incident: CSLEASE1 shipped with a $500 cap and a $5 fee, 2026-08).
+    ///
+    /// Price is deliberately NOT here: it re-values the tokens still unsold
+    /// against the escrow Target, so it keeps its own setter and its own lock
+    /// (D6). Nothing below can desync Target/Raised — the cap and the minimum
+    /// only gate who may buy next, and the fee is settled per trade.
+    pub fn updt_terms(
+        e: Env,
+        min_buy_amount: i128,
+        max_buy_per_buyer: i128,
+        fixed_fee: i128,
+    ) -> Result<(), SaleError> {
+        if min_buy_amount < 0 || max_buy_per_buyer < 0 || fixed_fee < 0 {
+            return Err(SaleError::InvalidAmount);
+        }
+        // A cap under the minimum ticket makes the offer unbuyable by anyone:
+        // every trade fails either BelowMinimum or BuyerCapExceeded.
+        if max_buy_per_buyer > 0 && max_buy_per_buyer < min_buy_amount {
+            return Err(SaleError::InvalidAmount);
+        }
+        let mut offer = load_offer(&e);
+        offer.seller.require_auth();
+        offer.min_buy_amount = min_buy_amount;
+        offer.max_buy_per_buyer = max_buy_per_buyer;
+        offer.fixed_fee = fixed_fee;
+        write_offer(&e, &offer);
+        emit(
+            &e,
+            symbol_short!("terms"),
+            (
+                min_buy_amount,
+                max_buy_per_buyer,
+                fixed_fee,
+                e.ledger().sequence(),
+            ),
+        );
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════
+    // Admin transfer (2-step)
+    // ═══════════════════════════════════════════
+
+    /// Step 1: Current admin proposes a new admin.
+    pub fn propose_admin(e: Env, new_admin: Address) {
+        let offer = load_offer(&e);
+        offer.admin.require_auth();
+        e.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        e.storage().instance().extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+        emit(&e, symbol_short!("padmin"), (new_admin, e.ledger().sequence()));
+    }
+
+    /// Step 2: Proposed admin accepts the role.
+    pub fn accept_admin(e: Env) -> Result<(), SaleError> {
+        let pending: Address = e
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(SaleError::NoPendingAdmin)?;
+        pending.require_auth();
+
+        let mut offer = load_offer(&e);
+        let old_admin = offer.admin.clone();
+        offer.admin = pending;
+        write_offer(&e, &offer);
+
+        e.storage().instance().remove(&DataKey::PendingAdmin);
+        emit(&e, symbol_short!("aadmin"), (old_admin, e.ledger().sequence()));
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════
+    // Buyer freeze / blocklist
+    // ═══════════════════════════════════════════
+
+    /// Admin freezes or unfreezes a buyer. Frozen buyers cannot trade.
+    pub fn freeze_buyer(e: Env, buyer: Address, frozen: bool) {
+        let offer = load_offer(&e);
+        offer.admin.require_auth();
+
+        let key = DataKey::BuyerBlocked(buyer.clone());
+        if frozen {
+            e.storage().persistent().set(&key, &true);
+            e.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND);
+        } else {
+            e.storage().persistent().remove(&key);
+        }
+        emit(&e, symbol_short!("freeze"), (buyer, frozen, e.ledger().sequence()));
+    }
+
+    /// Returns whether a buyer is frozen.
+    pub fn is_frozen(e: Env, buyer: Address) -> bool {
+        is_buyer_blocked(&e, &buyer)
+    }
+
+    // ═══════════════════════════════════════════
+    // Read-only queries
+    // ═══════════════════════════════════════════
+
+    /// Upgrade contract WASM. Admin only (high-privilege).
+    pub fn upgrade(e: Env, new_wasm_hash: BytesN<32>) -> Result<(), SaleError> {
+        let offer = load_offer(&e);
+        offer.admin.require_auth();
+        // v9 (V13): the code does not change while investors have principal
+        // held or tokens owed inside. Bug mid-round → cancel() → refund → new
+        // offer. This is what keeps a compromised admin key away from the cash.
+        // v9.1: also refused while an escrow round is ACTIVE and still empty — swapping
+        // the code there would capture every purchase that follows. Allowed only before
+        // activation or once the round is resolved with nothing inside.
+        let active_round = raise_mode(&e) == MODE_ESCROW
+            && sale_state(&e) == STATE_RAISING
+            && raise_target(&e) > 0;
+        if held(&e) > 0 || total_owed(&e) > 0 || active_round {
+            return Err(SaleError::WrongState);
+        }
+        e.deployer().update_current_contract_wasm(new_wasm_hash.clone());
+        emit(&e, symbol_short!("upgrade"), (new_wasm_hash, e.ledger().sequence()));
+        Ok(())
+    }
+
+    /// Extend contract instance TTL. Anyone can call (allows cron jobs).
+    /// NOTE: WASM code TTL must be extended separately via
+    /// `stellar contract extend --wasm-hash <HASH> --ledgers-to-extend 518400`
+    pub fn extend_ttl(e: Env) {
+        e.storage().instance().extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+    }
+
+    /// Returns the current offer state.
+    pub fn get_offer(e: Env) -> Offer {
+        load_offer(&e)
+    }
+
+    /// Returns the contract's balance of the sell token.
+    pub fn get_balance(e: Env) -> i128 {
+        let offer = load_offer(&e);
+        token::Client::new(&e, &offer.sell_token).balance(&e.current_contract_address())
+    }
+
+    /// Returns cumulative buy_token spent by a buyer.
+    pub fn get_buyer_spent(e: Env, buyer: Address) -> i128 {
+        get_buyer_spent(&e, &buyer)
+    }
+
+    /// Returns the contract version.
+    pub fn version(_e: Env) -> u32 {
+        CONTRACT_VERSION
+    }
+}
+
+// ═══════════════════════════════════════════
+// Internal helpers
+// ═══════════════════════════════════════════
+
+fn load_offer(e: &Env) -> Offer {
+    e.storage().instance().get(&DataKey::Offer).unwrap()
+}
+
+fn write_offer(e: &Env, offer: &Offer) {
+    e.storage().instance().set(&DataKey::Offer, offer);
+    e.storage().instance().extend_ttl(TTL_THRESHOLD, TTL_EXTEND);
+}
+
+fn get_buyer_spent(e: &Env, buyer: &Address) -> i128 {
+    let key = DataKey::BuyerSpent(buyer.clone());
+    e.storage().persistent().get(&key).unwrap_or(0)
+}
+
+fn set_buyer_spent(e: &Env, buyer: &Address, amount: i128) {
+    let key = DataKey::BuyerSpent(buyer.clone());
+    e.storage().persistent().set(&key, &amount);
+    e.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND);
+}
+
+fn is_buyer_blocked(e: &Env, buyer: &Address) -> bool {
+    let key = DataKey::BuyerBlocked(buyer.clone());
+    e.storage().persistent().get(&key).unwrap_or(false)
+}
+
+// ── v8 escrow state helpers ──
+// Every read defaults to the v7 meaning of "key absent" (direct mode, raising,
+// zeroes) so a v7-born instance upgraded in place keeps behaving as v7 (D9/D14).
+
+/// v8.1 (D13 enforced): sell tokens are locked whenever they back a live
+/// claim — from the moment the Target is frozen (first activation) until the
+/// raise resolves, and for good once it is Closed. They may leave BEFORE
+/// activation (Target == 0, no trade possible) and AFTER fail() (refunds are
+/// USDC-only, the tokens back nothing).
+fn sell_tokens_locked(e: &Env) -> bool {
+    if raise_mode(e) != MODE_ESCROW {
+        return false;
+    }
+    let state = sale_state(e);
+    (state == STATE_RAISING && raise_target(e) > 0) || (state == STATE_CLOSED && total_owed(e) > 0)
+}
+
+fn min_raise(e: &Env) -> i128 {
+    e.storage().instance().get(&DataKey::MinRaise).unwrap_or(0)
+}
+fn total_owed(e: &Env) -> i128 {
+    e.storage().instance().get(&DataKey::TotalOwed).unwrap_or(0)
+}
+fn set_total_owed(e: &Env, v: i128) {
+    e.storage().instance().set(&DataKey::TotalOwed, &v);
+}
+fn held(e: &Env) -> i128 {
+    e.storage().instance().get(&DataKey::Held).unwrap_or(0)
+}
+fn set_held(e: &Env, v: i128) {
+    e.storage().instance().set(&DataKey::Held, &v);
+}
+/// v9: the round closes when fully subscribed (any time) or, past the
+/// deadline, when raised >= floor (floor 0 = the target itself).
+fn closeable(e: &Env, offer: &Offer) -> bool {
+    if raise_mode(e) != MODE_ESCROW || sale_state(e) != STATE_RAISING {
+        return false;
+    }
+    let target = raise_target(e);
+    if target == 0 {
+        return false;
+    }
+    let raised = raise_raised(e);
+    if raised == target {
+        return true;
+    }
+    let floor = if min_raise(e) == 0 { target } else { min_raise(e) };
+    raised > 0 && e.ledger().sequence() > offer.deadline_ledger && raised >= floor
+}
+
+fn raise_mode(e: &Env) -> u32 {
+    e.storage().instance().get(&DataKey::RaiseMode).unwrap_or(MODE_DIRECT)
+}
+
+fn sale_state(e: &Env) -> u32 {
+    e.storage().instance().get(&DataKey::SaleState).unwrap_or(STATE_RAISING)
+}
+
+fn raise_target(e: &Env) -> i128 {
+    e.storage().instance().get(&DataKey::RaiseTarget).unwrap_or(0)
+}
+
+fn raise_raised(e: &Env) -> i128 {
+    e.storage().instance().get(&DataKey::RaiseRaised).unwrap_or(0)
+}
+
+fn get_contribution(e: &Env, buyer: &Address) -> i128 {
+    e.storage().persistent().get(&DataKey::Contribution(buyer.clone())).unwrap_or(0)
+}
+
+fn set_contribution(e: &Env, buyer: &Address, amount: i128) {
+    let key = DataKey::Contribution(buyer.clone());
+    e.storage().persistent().set(&key, &amount);
+    e.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND);
+}
+
+fn get_tokens_owed(e: &Env, buyer: &Address) -> i128 {
+    e.storage().persistent().get(&DataKey::TokensOwed(buyer.clone())).unwrap_or(0)
+}
+
+fn set_tokens_owed(e: &Env, buyer: &Address, amount: i128) {
+    let key = DataKey::TokensOwed(buyer.clone());
+    e.storage().persistent().set(&key, &amount);
+    e.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND);
+}
+
+mod test;

@@ -1,0 +1,12 @@
+Radox Contracts
+Copyright 2026 Radox contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The custody_registry contract was originally part of rio-miami-rail:
+Copyright 2026 the rio-miami-rail contributors.
+Original revision: pwsaragossy/radox-rail@0961f83d6e553159021705131fd27a329aebc68a.
+
+The five other contracts were extracted from radox-labs/radox-core at
+9414d8f10644a8028dfce8e62fbab8a2abc530d0. Their source was not modified
+by the extraction; manifests only gained the Apache-2.0 license declaration.
