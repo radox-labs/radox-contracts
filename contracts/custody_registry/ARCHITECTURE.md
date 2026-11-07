@@ -1,12 +1,14 @@
 # Radox Rail — technical architecture
 
-Co-signed cargo custody between companies, readable by any Soroban contract.
+Co-signed cargo custody between companies, readable by any Soroban contract, with a cargo token (RWA) that moves
+with each co-signed handover.
 Prepared for the Stellar Community Fund #46 (Open Track). v0.1 is deployed; v2 is the scope of the award.
 
 ## 1. Purpose and trust model
 
 Radox Rail records who physically holds a shipment, handover by handover, on Stellar, and lets any Soroban contract
-read it. The registry moves no money and no token.
+read it. The registry itself moves no money and no token; the cargo token (v2, section 2) represents each shipment
+and follows the custody the registry records.
 
 - What the chain proves: which registered organizations signed each step, in order.
 - What it does not prove: that the goods moved. Two colluding custodians can sign a false step. Each step carries an
@@ -28,6 +30,7 @@ flowchart LR
   end
   subgraph Stellar [Stellar / Soroban]
     REG[custody_registry]
+    TOK[Cargo token RWA<br/>one per shipment or lot]
     CON[Consumer contracts<br/>escrow, lending, insurance]
   end
   VER[verify library<br/>open source]
@@ -36,6 +39,7 @@ flowchart LR
   SDK --> API
   API -- submit --> REG
   REG -- events --> IDX
+  TOK -- moves only with a co-signed handover --> REG
   CON -- read interface --> REG
   VER -- recompute head from Horizon --> REG
 ```
@@ -47,7 +51,10 @@ On chain (Apache-2.0, this repository):
   stay on v0.1.
 - v2 adds: organization registry with KYB attestation; lots (split, consolidate); typed exceptions (damage, partial
   delivery, dispute); a standard read interface for other contracts.
-- Demo consumer (v2): an escrow contract that releases USDC only when the registry reports Delivered.
+- Cargo token (v2): represents each shipment or lot on chain. It moves only inside a co-signed handover recorded in
+  the registry, so its holder always matches the current custodian, and it cannot be transferred on its own. When the
+  registry reports Delivered, the buyer's USDC is released to the seller (delivery versus payment). It is the first
+  consumer of the read interface.
 
 Off chain: Rail API and indexer (Radox) build each transaction, collect the custodians' authorization entries, pay the
 fee and submit; the indexer keeps full history beyond the RPC event window. JS SDK and a reference co-sign screen.
@@ -145,7 +152,8 @@ total, of which 13.40 XLM was the one-time upload of the contract code.
 
 ## 10. How the award is measured on chain
 
-Each shipment adds an open, one co-signed handover per change of custody and a delivery; each company adds an
+Each shipment adds an open, one co-signed handover per change of custody and a delivery, and its cargo token moves
+with each handover; each company adds an
 organization entry and its own signing account; each consumer contract reads the registry before it pays. All of it
 is counted from public chain data. The Tranche 3 metric: at least 12 co-signed handovers, across at least 3
 shipments and at least 4 outside organizations, on the mainnet v2 registry, where both signers are registered
