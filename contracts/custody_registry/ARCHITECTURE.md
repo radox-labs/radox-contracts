@@ -132,3 +132,21 @@ SCF Audit Bank before mainnet. v0.1 has unit and property tests and has not been
 
 On mainnet each v0.1 handover was charged 0.0015 XLM (Horizon). The nine-transaction test shipment cost 13.58 XLM in
 total, of which 13.40 XLM was the one-time upload of the contract code.
+
+## 9. Check it yourself
+
+- Mainnet: the registry [`CDV7YI7K…WS7LD4UP`](https://stellar.expert/explorer/public/contract/CDV7YI7KYTDH4LPOLVUVRTFERJKYOWBBT6KS56ZX3V7EOGDBWS7LD4UP)
+  and the test shipment `5dc2e39a…25656b2d` (status Delivered, seq 4), with its transactions on Stellar Expert.
+- Head rule: in [`radox-labs/miami-rio-rail`](https://github.com/radox-labs/miami-rio-rail),
+  `node scripts/verify-head.mjs --selftest` recomputes the fixed test vector that the contract's unit test also uses.
+- Full history: the same script recomputes a testnet demo shipment's head from Horizon and prints MATCH against
+  `head(key)`; [rio-miami-rail.vercel.app](https://rio-miami-rail.vercel.app) does the same in the browser.
+  Mainnet support in the script is a Tranche 2 deliverable (verify library).
+
+## 10. How the award is measured on chain
+
+Each shipment adds an open, one co-signed handover per change of custody and a delivery; each company adds an
+organization entry and its own signing account; each consumer contract reads the registry before it pays. All of it
+is counted from public chain data. The Tranche 3 metric: at least 12 co-signed handovers, across at least 3
+shipments and at least 4 outside organizations, on the mainnet v2 registry, where both signers are registered
+organizations outside the Radox team.
