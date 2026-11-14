@@ -1,0 +1,133 @@
+name: contracts
+
+# Tests and reproducible WASM builds for every crate under contracts/.
+# Each crate is an independent unit with its own toolchain (rust-toolchain.toml),
+# lockfile and soroban-sdk version. Nothing here deploys or signs anything.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  STELLAR_CLI_VERSION: "28.1.0"
+  STELLAR_CLI_SHA256: "c1680deee94301d33ada7a17f98411e642a4248c727afbd2e43050d345746462"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  crate:
+    name: ${{ matrix.crate }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # nets: network features that select the canonical USDC SAC (F-006).
+          # Empty = crate has no network features; built with its defaults.
+          - { crate: token_sale,          nets: "testnet mainnet" }
+          - { crate: maturity_settlement, nets: "testnet mainnet" }
+          - { crate: yield_distributor,   nets: "testnet mainnet" }
+          - { crate: recovery_policy,     nets: "testnet mainnet" }
+          - { crate: transfer_agent,      nets: "" }
+          - { crate: custody_registry,    nets: "" }
+    defaults:
+      run:
+        shell: bash
+        working-directory: contracts/${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the crate's pinned toolchain
+        run: |
+          test -f rust-toolchain.toml || { echo "::error::missing rust-toolchain.toml"; exit 1; }
+          rustup toolchain install   # reads rust-toolchain.toml (channel + targets)
+          rustc --version
+          rustup target list --installed | grep -qx wasm32v1-none || rustup target add wasm32v1-none
+
+      - name: Install stellar-cli (pinned, sha256-checked)
+        working-directory: ${{ runner.temp }}
+        run: |
+          f="stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "$f" "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/$f"
+          echo "${STELLAR_CLI_SHA256}  $f" | sha256sum -c -
+          mkdir -p bin && tar -xzf "$f" -C bin stellar
+          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
+
+      - name: Tests (network features first, default last)
+        # `cargo test` rewrites test_snapshots/ for the feature set of the run, so the
+        # order is fixed and the default run (the committed snapshots) goes last.
+        env:
+          NETS: ${{ matrix.nets }}
+        run: |
+          count() { grep -E '^test result:' "$1" | awk '{p+=$4} END{print p+0}'; }
+          for net in $NETS; do
+            cargo test --locked --no-default-features --features "$net" 2>&1 | tee "$RUNNER_TEMP/test-$net.log"
+            test "${PIPESTATUS[0]}" -eq 0
+          done
+          cargo test --locked 2>&1 | tee "$RUNNER_TEMP/test-default.log"
+          test "${PIPESTATUS[0]}" -eq 0
+          base=$(count "$RUNNER_TEMP/test-default.log")
+          echo "default: $base passed" >> "$GITHUB_STEP_SUMMARY"
+          [ "$base" -ge 1 ] || { echo "::error::no tests ran"; exit 1; }
+          for net in $NETS; do
+            n=$(count "$RUNNER_TEMP/test-$net.log")
+            echo "$net: $n passed" >> "$GITHUB_STEP_SUMMARY"
+            # a network build must not silently drop tests (false green)
+            [ "$n" -ge "$base" ] || { echo "::error::$net ran $n tests, fewer than default ($base)"; exit 1; }
+          done
+
+      - name: Report test_snapshots drift (informational)
+        run: |
+          if ! git diff --quiet -- test_snapshots; then
+            echo "::warning::committed test_snapshots differ from the default run"
+            git diff --stat -- test_snapshots | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Guard - testing + mainnet must not compile
+        if: matrix.nets != ''
+        run: |
+          if cargo check --locked --features mainnet; then
+            echo "::error::testing+mainnet compiled: a WASM without the USDC gate is possible"
+            exit 1
+          fi
+          echo "guard ok: testing+mainnet refused" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build WASM
+        env:
+          NETS: ${{ matrix.nets }}
+          OUT: ${{ runner.temp }}/wasm
+        run: |
+          stellar --version
+          if [ -n "$NETS" ]; then
+            for net in $NETS; do
+              stellar contract build --locked --no-default-features --features "$net" --out-dir "$OUT/$net"
+            done
+          else
+            stellar contract build --locked --out-dir "$OUT/default"
+          fi
+          cd "$OUT"
+          sha256sum */*.wasm | tee sha256.txt
+          {
+            echo "### ${{ matrix.crate }} — WASM sha256 (rustc $(rustc --version | cut -d' ' -f2), stellar-cli ${STELLAR_CLI_VERSION})"
+            echo '```'
+            cat sha256.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-${{ matrix.crate }}
+          path: ${{ runner.temp }}/wasm
+          if-no-files-found: error
+          retention-days: 30
