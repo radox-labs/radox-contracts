@@ -15,13 +15,13 @@ Nada foi implantado nem alterado on-chain. Não houve comparação com os WASM v
 
 | | Valor |
 |---|---|
-| Candidato `X` | `radox-contracts@913798376f6fb658cff25117793f3c2007dbd390` (`main`) |
+| Candidato `X` | `radox-contracts@913798376f6fb658cff25117793f3c2007dbd390` (`main` à data; `d3da62e` só muda 4 `test_snapshots`, sem efeito em WASM nem em contagens, confirmado pela CI do PR, run `43911456637`) |
 | Referência | `radox-core@042cfca946f95835029cd426ebae9cd0f665ce0b` (`main`), pasta `contracts/` |
 | Extração | `git archive` de cada commit, com `core.autocrlf=false` (blobs LF, ver nota 1) |
 | Máquina | WSL2, Linux 6.18.33.2 x86_64 |
 | rustc / cargo | 1.86.0 (`05f9846f8 2025-03-31`) / 1.86.0, lido do `rust-toolchain.toml` de cada crate; `custody_registry`: 1.99.1 (`58cf8f9c3 2026-10-13`) |
 | stellar-cli | 28.1.0 (`c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd`), a mesma da CI |
-| Diferença de fonte entre os lados | só `license = "Apache-2.0"` acrescentado aos 5 `Cargo.toml`. `src/`, `Cargo.lock`, `rust-toolchain.toml`, `shared/` e `test_snapshots/` são idênticos byte a byte (`diff -r`) |
+| Diferença de fonte entre os lados | só `license = "Apache-2.0"` acrescentado aos 5 `Cargo.toml`. `src/`, `Cargo.lock`, `rust-toolchain.toml`, `shared/` e `test_snapshots/` são idênticos byte a byte (`diff -r`) em `042cfca` × `9137983`; em `d3da62e` os 4 `test_snapshots` atualizados deixam de ser iguais aos do Core, o que não afeta WASM nem contagens |
 
 Nota 1: o worktree do Core nesta máquina tem `core.autocrlf=true`, e um `git archive` sem `-c core.autocrlf=false` entrega CRLF, o que dá um diff falso em todos os ficheiros. No repositório (`git ls-files --eol`) os ficheiros são `i/lf`.
 
@@ -86,12 +86,13 @@ Os 9 hashes de testnet, de mainnet e do `transfer_agent` que a CI do GitHub publ
 ```sh
 # fontes (LF)
 git -C <radox-core> -c core.autocrlf=false archive 042cfca contracts | tar -x -C src/core
-git -C <radox-contracts> archive 9137983 contracts | tar -x -C src/rc
-# por lado, no MESMO caminho, árvore e target apagados entre lados:
+git -C <radox-contracts> -c core.autocrlf=false archive 9137983 contracts | tar -x -C src/rc
+# OUT absoluto e fora de build/ (build/ é apagado entre lados), ex.: OUT=$HOME/.cache/radox-consol/f1/out
+# por lado, no MESMO caminho, árvore e target apagados entre lados (rm -rf build):
 cp -a src/<lado>/contracts build/contracts && cd build/contracts/<crate>
-stellar contract build --locked --out-dir out/<lado>/default
-stellar contract build --locked --no-default-features --features testnet --out-dir out/<lado>/testnet
-stellar contract build --locked --no-default-features --features mainnet --out-dir out/<lado>/mainnet
-sha256sum out/*/*/*.wasm
+stellar contract build --locked --out-dir "$OUT/<lado>/default"
+stellar contract build --locked --no-default-features --features testnet --out-dir "$OUT/<lado>/testnet"
+stellar contract build --locked --no-default-features --features mainnet --out-dir "$OUT/<lado>/mainnet"
+sha256sum "$OUT"/*/*/*.wasm
 stellar contract info interface --wasm <f> --output rust; stellar contract info meta --wasm <f>
 ```
