@@ -50,7 +50,7 @@
                         "symbol": "buy_token"
                       },
                       "val": {
-                        "address": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA"
+                        "address": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
                       }
                     },
                     {
@@ -115,6 +115,22 @@
                       },
                       "val": {
                         "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "two_thirds_floor"
+                      },
+                      "val": {
+                        "bool": false
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "withdraw_window_secs"
+                      },
+                      "val": {
+                        "u64": "0"
                       }
                     }
                   ]
@@ -330,7 +346,7 @@
                               "symbol": "buy_token"
                             },
                             "val": {
-                              "address": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA"
+                              "address": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
                             }
                           },
                           {
@@ -362,7 +378,7 @@
                               "symbol": "layout_version"
                             },
                             "val": {
-                              "u32": 1
+                              "u32": 2
                             }
                           },
                           {
@@ -395,6 +411,22 @@
                             },
                             "val": {
                               "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG"
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "two_thirds_floor"
+                            },
+                            "val": {
+                              "bool": false
+                            }
+                          },
+                          {
+                            "key": {
+                              "symbol": "withdraw_window_secs"
+                            },
+                            "val": {
+                              "u64": "0"
                             }
                           }
                         ]
@@ -468,7 +500,7 @@
           "data": {
             "contract_data": {
               "ext": "v0",
-              "contract": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "contract": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
               "key": {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
               },
@@ -488,7 +520,7 @@
           "data": {
             "contract_data": {
               "ext": "v0",
-              "contract": "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+              "contract": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75",
               "key": "ledger_key_contract_instance",
               "durability": "persistent",
               "val": {
