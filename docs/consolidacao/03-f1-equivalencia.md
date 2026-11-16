@@ -7,7 +7,7 @@ Nada foi implantado nem alterado on-chain. Não houve comparação com os WASM v
 
 | Porta | Resultado |
 |---|---|
-| F1.2 contagem de testes | **≥ em todos** os 5 crates × features: contagens **iguais** às do Core (16/16 rodadas), mais 26 do `custody_registry` (sem par no Core) |
+| F1.2 contagem de testes | **≥ em todos** os 5 crates × features: contagens **iguais** às do Core (13/13 rodadas `--lib`/testnet/mainnet, mais as 5 rodadas default completas), mais 26 do `custody_registry` (sem par no Core) |
 | F1.3 equivalência de bytes | **13/13 sha256 iguais**; interface e meta iguais nos 13 pares |
 | F1.4 custody_registry | **reproduz** `8230ed937f443e40054d0806c9cdd044ef341db19f0c1b3123c573adb7a41342` com rustc 1.99.1 + stellar-cli 28.1.0 |
 
@@ -39,7 +39,7 @@ Comandos do `scripts/ci-local.sh` do Core (`run_contract_crate`): `cargo test --
 | custody_registry | n/a → 26 | n/a | n/a | n/a |
 
 A rodada default completa (`cargo test --locked`, sem `--lib`, que é a da CI do rc) dá os mesmos números.
-A CI do GitHub no `main` (`9137983`, run `43901932399`, `success`) mostra as mesmas contagens nas features de rede e 26 no `custody_registry`.
+A CI do GitHub no `main` (`9137983`, run `43901932399`, `success`) mostra as mesmas contagens (testnet, mainnet e default completo dos 5 crates) e 26 no `custody_registry`.
 
 **Testes opcionais com WASM externo (`yield_distributor --features wasm-tests`, critério de `2b8d700`):** não compilam em nenhum dos lados, com o mesmo erro: `error[E0063]: missing field 'tokens' in initializer of 'SettleItem'` em `src/test.rs` (módulo `birth_to_death`). O teste ficou para trás em relação à API do `maturity_settlement`. Foram corridos com os pré-requisitos dos comentários: `deploy/mainnet-wasm/yield_distributor.wasm` do Core (sha256 `88509c72…4203`) no caminho relativo esperado e `maturity_settlement` construído para `wasm32v1-none --release`. É um defeito pré-existente e igual nos dois lados, por isso não bloqueia a equivalência. Corrigi-lo fica para um PR à parte (não é só docs). Fora do Core, o `worst_case_30_investors_fits_mainnet_wasm` precisa também desse artefacto, que não está neste repo.
 
