@@ -4,6 +4,7 @@
 !.env.template
 **/target/
 **/.DS_Store
+.artifacts/
 *.pem
 *.key
 

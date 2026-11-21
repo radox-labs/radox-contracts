@@ -21,4 +21,37 @@ O código-fonte não prova o estado implantado na rede. Confira IDs, hashes de W
 
 Cada crate é independente e deve ser compilado e testado dentro de `contracts/<nome>/`, com seu toolchain, lockfile e versão de `soroban-sdk`. A licença do repositório e de todos os crates é Apache-2.0, confirmada para esta publicação pelo responsável da Radox.
 
-A migração dos scripts de build e deploy do Core ainda está em andamento. **Não use este diretório para cerimônias de produção** sem validar a equivalência byte a byte dos artefatos, hashes e configurações de rede.
+## Build e deploy na testnet
+
+O repositório compila, instala o WASM e cria instâncias na testnet sem depender do Core:
+
+```bash
+# Compilar todos os WASMs com as features corretas de testnet
+scripts/deploy-testnet.sh build all
+
+# Instalar todos os WASMs; a saída contém o sha256 devolvido pela rede
+scripts/deploy-testnet.sh upload all --source <identidade do Stellar CLI ou chave S...>
+
+# Instalar e criar uma instância; os argumentos após `--` vão ao construtor
+scripts/deploy-testnet.sh deploy yield_distributor \
+  --source <identidade do Stellar CLI ou chave S...> -- --admin G...
+```
+
+Contratos com construtor exigem seus argumentos: `token_sale`, `yield_distributor`, `transfer_agent` e
+`custody_registry`. `maturity_settlement` cria uma instância vazia e continua exigindo a chamada posterior de
+`initialize`. `recovery_policy` não tem construtor. Use `stellar contract deploy --help` dentro do crate para ver a
+interface gerada e o formato de structs como `Config`.
+
+O comando é deliberadamente limitado à testnet. Ele sempre usa `--locked` e `--no-default-features`; nos quatro crates
+com diferenças por rede, também usa `--features testnet`. Depois do upload, compara o hash devolvido pela rede com o
+SHA-256 do arquivo local. Os artefatos ficam em `.artifacts/testnet/` e não são versionados.
+
+A Action manual **deploy testnet** faz o upload de um contrato ou de todos. Ela usa o environment protegido `testnet`,
+que deve conter o secret `TESTNET_DEPLOYER_SECRET`. A Action instala somente o código WASM; a criação de instâncias fica
+no comando local porque os parâmetros e os responsáveis variam por contrato.
+
+O Core continua consumindo o commit fixado no `contracts.lock.json` dele. Um upload ou deploy de testnet feito aqui não
+altera automaticamente a versão usada pelo Core.
+
+**Não use este fluxo para cerimônias de produção.** Mainnet continua exigindo artefato staged, manifesto, conferência de
+hash e runbook no repositório operacional.
