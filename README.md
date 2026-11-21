@@ -2,6 +2,16 @@
 
 Código-fonte dos contratos Soroban usados pelos produtos Radox. Este repositório foi preparado para ser a fonte única dos contratos; não se confunde com os registros de implantação.
 
+## Aviso legal
+
+Este repositório contém apenas código-fonte de contratos inteligentes. Ele não constitui oferta pública de valores mobiliários, nem recomendação, solicitação ou consultoria de investimento, e não descreve, anuncia nem promove nenhuma oferta específica.
+
+Alguns contratos (por exemplo, `token_sale`) implementam mecanismos ligados à Resolução CVM nº 88/2022, que regula o crowdfunding de investimento no Brasil. Uma oferta feita com base nessa resolução só pode ser distribuída por uma plataforma eletrônica de investimento participativo registrada na CVM (Res. CVM 88, arts. 2º, IV, 5º e 18). Qualquer outra emissão pública de valores mobiliários no Brasil depende de registro na CVM ou de dispensa prevista na regulamentação (Lei nº 6.385/1976, art. 19). O cumprimento dessas regras é responsabilidade da plataforma e do emissor que operam a oferta, incluindo a parte que fica fora da blockchain (cadastro, termo de ciência de risco, limites por investidor, divulgação de informações). Usar este código não torna nenhuma oferta conforme.
+
+O código é distribuído "no estado em que se encontra" ("AS IS"), sem garantias de qualquer tipo, nos termos das seções 7 e 8 da [licença Apache-2.0](LICENSE).
+
+Salvo se um relatório de auditoria estiver publicado e indicado neste README, trate o código como não auditado. Menções a revisões, achados ou auditores nos comentários do código não são um relatório de auditoria e não implicam nenhuma.
+
 ## Contratos
 
 - `token_sale`, `yield_distributor`, `maturity_settlement`, `transfer_agent` e `recovery_policy`: copiados de `radox-core` no commit `9414d8f10644a8028dfce8e62fbab8a2abc530d0`.
