@@ -1,0 +1,82 @@
+name: deploy testnet
+
+# Instala WASMs na testnet. Criar instâncias continua explícito no comando local,
+# porque cada contrato tem parâmetros de construtor e donos diferentes.
+on:
+  workflow_dispatch:
+    inputs:
+      contract:
+        description: Contrato cujo WASM será instalado
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - token_sale
+          - maturity_settlement
+          - yield_distributor
+          - recovery_policy
+          - transfer_agent
+          - custody_registry
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-testnet
+  cancel-in-progress: false
+
+env:
+  STELLAR_CLI_VERSION: "28.1.0"
+  STELLAR_CLI_SHA256: "c1680deee94301d33ada7a17f98411e642a4248c727afbd2e43050d345746462"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  upload:
+    name: upload ${{ inputs.contract }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: testnet
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchains
+        shell: bash
+        run: |
+          (cd contracts/token_sale && rustup toolchain install)
+          (cd contracts/custody_registry && rustup toolchain install)
+
+      - name: Install stellar-cli (pinned, sha256-checked)
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          f="stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "$f" "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/$f"
+          echo "${STELLAR_CLI_SHA256}  $f" | sha256sum -c -
+          mkdir -p bin && tar -xzf "$f" -C bin stellar
+          echo "${{ runner.temp }}/bin" >> "$GITHUB_PATH"
+
+      - name: Upload WASM to testnet
+        shell: bash
+        env:
+          STELLAR_ACCOUNT: ${{ secrets.TESTNET_DEPLOYER_SECRET }}
+        run: |
+          test -n "$STELLAR_ACCOUNT" || { echo "::error::configure TESTNET_DEPLOYER_SECRET in the testnet environment"; exit 1; }
+          scripts/deploy-testnet.sh upload "${{ inputs.contract }}" | tee upload-results.txt
+          {
+            echo '### Testnet WASM hashes'
+            echo '```'
+            cat upload-results.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: testnet-upload-${{ inputs.contract }}-${{ github.sha }}
+          path: |
+            .artifacts/testnet
+            upload-results.txt
+          if-no-files-found: error
+          retention-days: 30
