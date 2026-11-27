@@ -4,6 +4,8 @@ Fontes: `radox-labs/miami-rio-rail` (`DEPLOYMENTS.md`, `README.md` §Mainnet, `p
 
 O código-fonte não prova o que está implantado. Antes de operar, confirme o contract ID e o hash do wasm na rede.
 
+A fonte máquina-legível é [`deployments/registry.json`](../../deployments/registry.json) (ver [`deployments/README.md`](../../deployments/README.md)). Esta página é a narrativa: `node scripts/check-registry.mjs` falha se ela citar um hash ou contract ID que não está no registry, ou se uma entrada `live` do registry faltar aqui. Mude os dois no mesmo commit.
+
 ## Wasm
 
 | | |
@@ -31,5 +33,6 @@ O código-fonte não prova o que está implantado. Antes de operar, confirme o c
 | operator | `GCXYI6RYMJQUNO2VFBPUTZ55WBRFVGBTZBOW3YF65ABLGPNNSHX3J4OF` |
 | sandbox (`POST /api/sandbox/shipments`) | `CBTHLSQXQNEZ25UMVRP5TGOCPOTJXLFISJ2EF5NRNITAZPGMMW656ERX` |
 | segundo registo (`proofs/three-machine.json`) | `CD7BUCY3DC7GTHRWFRBHNOFPMGVCHFDL4LHKXZNGEJISSGHI24KSNH3F` |
+| registo multiempresa (`proofs/multi-chain.json`; `miami-rio-rail` `contracts.lock.json` `multi_chain`, README §multi-chain) | `CDDWEENF6DKM4AHFWDBHQTYPLC3STMVFPXHXYDORLD53WDZM3FF3KJX4` |
 
 Todas as instâncias de testnet usam o mesmo wasm `8230ed93…1342`. Usam chaves de teste, e um reset da testnet apaga-as.
