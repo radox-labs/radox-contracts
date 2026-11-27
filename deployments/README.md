@@ -21,12 +21,13 @@ O código-fonte não prova o que está implantado. Este registry também não pr
 - Uma instância que fez `upgrade` aparece só no wasm que roda hoje. Exemplo: o singleton `CBIDF7ZW…` do yield está no `11887707…`, e o `ebb1ce41…` (v4) ficou com `contractId: null` e a história no `source`.
 - `null` = a fonte não registra o valor. Nada foi inventado nem reconstruído; IDs truncados nas fontes (`CBRIKOD64…`, `CBTHW3BK…`) ficam fora.
 - `features` = a feature de rede com que o wasm foi compilado (`--no-default-features --features <x>`). `null` junta dois casos: o crate não tem feature de rede, ou a fonte não registra os flags. O check recusa uma feature que o `Cargo.toml` do crate não declara, e na mainnet recusa `testnet` e `testing`.
-- `status`:
-  - `live`: o wasm/instância corrente daquele crate naquela rede segundo a fonte (registrado, em uso ou aceito para instâncias novas).
-    Pode haver vários `live` por crate e rede. Exemplos: o token_sale testnet v10 (em uso no dev) e v11 (registrado), e as 4 instâncias do custody. Também pode não haver nenhum: o transfer_agent testnet só tem `legacy`, e a mainnet não tem transfer_agent nem recovery_policy (crate sem deploy numa rede = sem chave).
-    O token_sale v11 e o maturity_settlement v5 de testnet são `live` com dúvida na própria fonte. A linha diz «registrado», mas o mesmo texto diz que o env segue no anterior (radox-core DEPLOYMENTS.md:164 e :178/:185); o `source` marca `UNCERTAIN`.
-  - `legacy`: está na rede, mas não é o corrente. Inclui versões substituídas, provas, ensaios e os wasm não reproduzíveis a partir da fonte, como o `transfer_agent` `3870748b…` (Rail `legacy: true`) e o yield `11887707…`. Uma instância `legacy` pode continuar rodando. Exemplo: o singleton do yield na testnet.
-  - Na mainnet, o `uploaded` do `manifest.json` do Core (maturity_settlement v3 `0f07a598…`, código instalado e wasm corrente das ofertas) foi mapeado para `live`.
+- `status` (decisão do Leo, 27/11/2026):
+  - `live` = aceito hoje pelo Core.
+    - yield_distributor e transfer_agent: o conjunto `live` de cada rede é exatamente o `YIELD_WASM_ACCEPTED`/`AGENT_WASM_ACCEPTED` (`public` = mainnet), e os singletons `YIELD_SHARED_SINGLETON`/`AGENT_SHARED_SINGLETON` são entradas `live` (radox-core@c8b29bc `backend/src/config/yieldInstance.js:34-45, :58-61`, `agentInstance.js:25-30, :37-39`). Daí ficam `live` na testnet o yield `ebb1ce41…`, `11887707…` (singleton `CBIDF7ZW…`) e `f6fbba00…`, e o transfer_agent `3870748b…` (`CAF4JIUZ…` e a instância do Rail `CAYD3EFT…`). Um teste compara com a cópia destas listas em c8b29bc; com um checkout do Core, `--core` (ou `RADOX_CORE_DIR` nos testes) as lê ao vivo.
+    - token_sale, maturity_settlement, recovery_policy e custody_registry: o Core não tem lista fechada (o wasm vem do env `SALE_WASM_HASH`/`SETTLEMENT_WASM_HASH`, e a policy de `RECOVERY_POLICY_CONTRACT_ID`). `live` = o wasm/instância corrente segundo a narrativa: env do dev, registrado, ou `live`/`uploaded` no `manifest.json` (o `uploaded` do maturity_settlement v3 mainnet `0f07a598…` = `live`). Pode haver vários (token_sale testnet v10 e v11, as 4 instâncias do custody).
+    - O token_sale v11 e o maturity_settlement v5 de testnet são `live` com dúvida na própria fonte. A linha diz «registrado», mas o mesmo texto diz que o env segue no anterior (radox-core DEPLOYMENTS.md:164 e :178/:185); o `source` marca `UNCERTAIN`.
+  - `legacy` = histórico, já não aceito. Inclui versões substituídas, provas, os uploads do ensaio F3 e o yield `88509c72…` de testnet, que é o build mainnet e não está na lista testnet do Core. Uma instância `legacy` pode continuar na rede.
+  - Um crate sem deploy numa rede não tem chave: a mainnet não tem transfer_agent nem recovery_policy.
   - Os wasm `staged`/`superseded` do manifest nunca subiram à mainnet e não entram em `mainnet`. Existem na testnet como uploads do ensaio da F3 (`legacy`, `features: "mainnet"`).
 - `source` = de onde veio cada valor: arquivo e linha no commit citado (`radox-core@c8b29bc`, `miami-rio-rail@1146786`) e as txs.
 
@@ -44,15 +45,23 @@ O `scripts/deploy-testnet.sh` do PR #5 (`needs_network_feature`) usa `--features
 ## Ferramentas
 
 ```sh
-node scripts/check-registry.mjs                 # schema + Cargo.toml + contracts/*/DEPLOYMENTS.md; exit 1 com a lista dos problemas
+node scripts/check-registry.mjs                 # schema + Cargo.toml + âncoras de contracts/*/DEPLOYMENTS.md; exit 1 com a lista dos problemas
+node scripts/check-registry.mjs --core ../radox-core   # + live == listas aceitas do Core
 node scripts/caatinga.mjs query yield_distributor --network mainnet   # só leitura; --json para máquina
-node --test scripts/test/registry.test.mjs      # testes
+RADOX_CORE_DIR=../radox-core node --test scripts/test/registry.test.mjs   # testes (sem o Core, 1 teste fica skip)
 ```
 
 O check confere:
-1. O schema e os invariantes: `(rede, contractId)` único; o mesmo wasm tem o mesmo crate, versão e features em qualquer rede.
-2. Que cada hash completo, hash abreviado (`8230ed93…1342`) e contract ID citado num `contracts/<crate>/DEPLOYMENTS.md` está no registry. Um hash de tx conta se estiver no `source` de uma entrada do crate. Sob um título `## testnet`/`## mainnet`, tem de estar nessa rede.
-3. O sentido inverso, só para os crates que têm `DEPLOYMENTS.md` aqui (hoje só o custody_registry): cada entrada `live` tem o wasm (completo) e o contract ID citados nele. Os outros crates têm a narrativa no `radox-core` `docs/Operations/DEPLOYMENTS.md`, fora deste repo.
+1. O schema e os invariantes:
+   - `contractId` com o checksum do strkey (CRC16);
+   - `(rede, contractId)` único, e o mesmo ID não pode estar em duas redes;
+   - o mesmo wasm tem o mesmo crate, versão e features em qualquer rede;
+   - as features têm de estar declaradas no `Cargo.toml` (na mainnet, nunca `testnet`/`testing`).
+2. **Âncora por crate.** Cada um dos 6 `contracts/<crate>/DEPLOYMENTS.md` tem uma secção `## Registro` com a tabela `| rede | versão | features | status | wasm | contrato | nota |`, uma linha por entrada. O registry e a tabela têm de ser iguais nos dois sentidos (rede, wasm, contrato, versão, features, status). Mudar um sem o outro, apagar ou acrescentar uma entrada, ou trocar um carácter num hash ou ID falha. Um crate sem âncora também falha.
+3. Que cada hash completo, hash abreviado (`8230ed93…1342`) e contract ID citado no resto do `DEPLOYMENTS.md` está no registry. Um hash de tx conta se estiver no `source` de uma entrada do crate. Sob um título `## testnet`/`## mainnet`, tem de estar nessa rede.
+4. Com `--core <checkout do radox-core>`: que o `live` do yield_distributor e do transfer_agent é igual às listas do Core.
+
+A âncora é uma segunda cópia de propósito. Os dados não ficam mais certos por isso (a origem de cada valor continua no `source`), mas um erro de edição num dos lados deixa de passar calado. A narrativa longa continua no `radox-core` `docs/Operations/DEPLOYMENTS.md`.
 
 ## Pendente
 
@@ -67,9 +76,9 @@ Só proposta; o PR #5 não foi editado.
 1. **Antes do upload:** `node scripts/check-registry.mjs` tem de passar. Um registry quebrado não recebe entradas novas.
 2. **Depois do `upload`** (hash da rede == sha256 local, como o script já exige): `node scripts/registry-add.mjs --network testnet --crate <c> --wasm <hash> --version <version()> --features <testnet|null> --source "deploy-testnet.sh upload tx <tx> (<commit>)"`.
    - O helper ainda não existe; é um passo seguinte pequeno, sobre `scripts/lib/registry.mjs`.
-   - Ele junta a entrada sem `contractId` (ou não faz nada se o par já existe) e reescreve o arquivo com a ordem estável.
+   - Ele junta a entrada sem `contractId` ao registry **e** a linha correspondente à tabela `## Registro` do `contracts/<c>/DEPLOYMENTS.md` (ou não faz nada se o par já existe), com a ordem estável. O check exige os dois iguais.
    - `--features` sai de `needs_network_feature`, e o check recusa uma feature que o Cargo.toml não declara.
    - A versão é lida da `CONTRACT_VERSION` do crate, ou de `stellar contract invoke … -- version` depois do deploy.
-3. **Depois do `deploy`:** a mesma chamada com `--contract-id <C…>`. A entrada nova entra `live` e, por omissão, a `live` anterior do mesmo crate passa a `legacy`. Uma flag `--keep-live` mantém as duas, para instâncias paralelas como as do custody.
+3. **Depois do `deploy`:** a mesma chamada com `--contract-id <C…>`. A entrada nova entra `legacy` por omissão: `live` = aceito pelo Core, e um upload da testnet só passa a `live` quando o Core o puser na lista (yield/transfer_agent) ou no env (token_sale/maturity), no mesmo PR ou num seguinte. `--live` marca-a já `live`, e o `--core` do check confere.
 4. **Na Action manual:** o `upload-results.txt` passa a levar uma linha JSON por crate (`{crate, wasmHash, tx}`). A Action não faz commit no registry (não tem permissão de escrita, e um commit automático em main é proibido): quem disparou a Action abre o PR com a linha juntada pelo helper. O check na CI do PR fecha o ciclo.
 5. **Só testnet:** o helper recusa `--network mainnet`. A mainnet entra só por PR humano depois da cerimônia, com o `source` a apontar para a tx.

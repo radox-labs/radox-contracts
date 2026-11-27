@@ -36,3 +36,15 @@ A fonte máquina-legível é [`deployments/registry.json`](../../deployments/reg
 | registo multiempresa (`proofs/multi-chain.json`; `miami-rio-rail` `contracts.lock.json` `multi_chain`, README §multi-chain) | `CDDWEENF6DKM4AHFWDBHQTYPLC3STMVFPXHXYDORLD53WDZM3FF3KJX4` |
 
 Todas as instâncias de testnet usam o mesmo wasm `8230ed93…1342`. Usam chaves de teste, e um reset da testnet apaga-as.
+
+## Registro
+
+Âncora do [`deployments/registry.json`](../../deployments/registry.json): uma linha por entrada, igual nos dois sentidos (`node scripts/check-registry.mjs`). Mude os dois no mesmo commit. `—` = null; a origem de cada valor está no `source` do registry.
+
+| rede | versão | features | status | wasm | contrato | nota |
+|---|---|---|---|---|---|---|
+| mainnet | 1 | — | live | `8230ed937f443e40054d0806c9cdd044ef341db19f0c1b3123c573adb7a41342` | `CDV7YI7KYTDH4LPOLVUVRTFERJKYOWBBT6KS56ZX3V7EOGDBWS7LD4UP` |  |
+| testnet | 1 | — | live | `8230ed937f443e40054d0806c9cdd044ef341db19f0c1b3123c573adb7a41342` | `CCBJVXMJYWPHTDJHDFPRGKPGXGEP24JOPJAMUS5C3BMZJTRTWR2H4LII` |  |
+| testnet | 1 | — | live | `8230ed937f443e40054d0806c9cdd044ef341db19f0c1b3123c573adb7a41342` | `CBTHLSQXQNEZ25UMVRP5TGOCPOTJXLFISJ2EF5NRNITAZPGMMW656ERX` |  |
+| testnet | 1 | — | live | `8230ed937f443e40054d0806c9cdd044ef341db19f0c1b3123c573adb7a41342` | `CD7BUCY3DC7GTHRWFRBHNOFPMGVCHFDL4LHKXZNGEJISSGHI24KSNH3F` |  |
+| testnet | 1 | — | live | `8230ed937f443e40054d0806c9cdd044ef341db19f0c1b3123c573adb7a41342` | `CDDWEENF6DKM4AHFWDBHQTYPLC3STMVFPXHXYDORLD53WDZM3FF3KJX4` |  |
