@@ -213,18 +213,37 @@ const NULL_CELL = new Set(["—", "-", ""]);
  * The "## Registro" table of a contracts/<crate>/DEPLOYMENTS.md: one row per registry entry.
  * Returns { rows, errors }; rows = null when the doc has no such section.
  */
+const splitRow = (l) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim().replace(/^`(.*)`$/, "$1"));
+// A table line shaped like an anchor row or header (7 cells: network ... 64-hex wasm ...).
+const looksLikeAnchorLine = (l) => {
+  if (!l.trim().startsWith("|")) return false;
+  const c = splitRow(l);
+  if (c.join("|") === ANCHOR_COLS.join("|")) return true;
+  return c.length === ANCHOR_COLS.length && /^(testnet|mainnet)$/i.test(c[0]) && /^[0-9a-fA-F]{64}$/.test(c[4]);
+};
+
 export function parseAnchor(text, docName = "DEPLOYMENTS.md") {
   const lines = text.split(/\r?\n/);
-  const start = lines.findIndex((l) => ANCHOR_HEADING.test(l));
-  if (start < 0) return { rows: null, errors: [] };
+  const starts = lines.flatMap((l, i) => (ANCHOR_HEADING.test(l) ? [i] : []));
+  const start = starts.length ? starts[0] : -1;
   const errors = [];
+  if (starts.length > 1) errors.push(`${docName}:${starts[1] + 1}: more than one "## Registro" section (first at line ${start + 1}); keep a single anchor`);
   const rows = [];
   let header = false;
+  let end = start; // last line of the anchor table
+  const strays = (from, to) => {
+    for (let i = from; i < to; i++) if (looksLikeAnchorLine(lines[i])) errors.push(`${docName}:${i + 1}: anchor-shaped table row outside the "## Registro" table`);
+  };
+  if (start < 0) {
+    strays(0, lines.length);
+    return { rows: null, errors };
+  }
   for (let i = start + 1; i < lines.length; i++) {
     const l = lines[i].trim();
     if (/^#{1,6}\s/.test(l)) break;
-    if (!l.startsWith("|")) { if (header && l !== "") break; continue; }
-    const cells = l.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim().replace(/^`(.*)`$/, "$1"));
+    if (!l.startsWith("|")) { if (header) break; continue; } // a blank line ends a markdown table
+    end = i;
+    const cells = splitRow(l);
     const at = `${docName}:${i + 1}`;
     if (!header) {
       if (cells.join("|") !== ANCHOR_COLS.join("|")) { errors.push(`${at}: anchor header must be | ${ANCHOR_COLS.join(" | ")} |`); return { rows, errors }; }
@@ -252,6 +271,8 @@ export function parseAnchor(text, docName = "DEPLOYMENTS.md") {
     rows.push(row);
   }
   if (!header) errors.push(`${docName}: "## Registro" has no table`);
+  strays(0, start);
+  strays(end + 1, lines.length);
   return { rows, errors };
 }
 

@@ -452,3 +452,51 @@ test("the Core lists read from a radox-core checkout equal the c8b29bc fixture a
   assert.deepEqual(lists, CORE_C8B29BC);
   assert.deepEqual(checkCoreLists(real(), lists), []);
 });
+
+// qa r2 (27/11/2026): one anchor per file, and no anchor-shaped rows outside it.
+test("anchor refuses a second \"## Registro\" section (dup_section)", () => {
+  const two = anchorDoc(aRows) + "\r\n## Registro\r\n\r\n| rede | versão | features | status | wasm | contrato | nota |\r\n|---|---|---|---|---|---|---|\r\n" + aRows[0].replace("| 1 |", "| 9 |");
+  assert.match(parseAnchor(two).errors.join(), /more than one "## Registro"/);
+});
+
+test("anchor refuses an anchor-shaped row outside the section (dup_row), before or after it", () => {
+  const stray = aRows[0].replace("| 1 |", "| 9 |");
+  assert.match(parseAnchor(anchorDoc(aRows) + "\r\n\r\nprosa\r\n" + stray).errors.join(), /anchor-shaped table row outside/);
+  assert.match(parseAnchor(anchorDoc(aRows) + "\r\n## depois\r\n" + stray).errors.join(), /anchor-shaped table row outside/);
+  assert.match(parseAnchor("## mainnet\n" + stray + "\n" + anchorDoc(aRows)).errors.join(), /anchor-shaped table row outside/);
+  assert.match(parseAnchor("# sem âncora\n" + stray).errors.join(), /anchor-shaped table row outside/);
+  // a blank line inside the section ends the table: a row after it is stray, not a second table
+  assert.match(parseAnchor(anchorDoc([aRows[0], "", aRows[1]])).errors.join(), /outside/);
+});
+
+test("real docs: no stray anchor rows, and each family member (every real row) copied outside the section is refused", () => {
+  for (const c of ["token_sale", "maturity_settlement", "yield_distributor", "recovery_policy", "transfer_agent", "custody_registry"]) {
+    const f = path.join(ROOT, "contracts", c, "DEPLOYMENTS.md");
+    const text = fs.readFileSync(f, "utf8");
+    assert.deepEqual(parseAnchor(text).errors, [], c);
+    const rowLines = text.split(/\r?\n/).filter((l) => /^\| (testnet|mainnet) \|/.test(l));
+    assert.ok(rowLines.length > 0, c);
+    for (const l of rowLines) {
+      assert.ok(parseAnchor(text + "\n\n## Outra\n\n" + l).errors.some((e) => /outside/.test(e)), `${c}: ${l.slice(0, 40)}`);
+      assert.ok(parseAnchor(text + "\n\n## Registro\n\n| rede | versão | features | status | wasm | contrato | nota |\n|---|---|---|---|---|---|---|\n" + l).errors.some((e) => /more than one/.test(e)), c);
+    }
+  }
+});
+
+test("check-registry fails on the real repo with a duplicated section or a stray row", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "registry-root-"));
+  try {
+    fs.mkdirSync(path.join(dir, "deployments"));
+    fs.cpSync(path.join(ROOT, "contracts"), path.join(dir, "contracts"), { recursive: true, filter: (p) => !p.includes(`${path.sep}target`) && !p.includes("test_snapshots") && !p.includes(`${path.sep}src`) });
+    fs.copyFileSync(REG_FILE, path.join(dir, "deployments", "registry.json"));
+    const f = path.join(dir, "contracts", "yield_distributor", "DEPLOYMENTS.md");
+    const orig = fs.readFileSync(f, "utf8");
+    const row = orig.split(/\r?\n/).find((l) => l.startsWith("| mainnet |"));
+    fs.writeFileSync(f, orig + "\n## Notas\n\n" + row.replace("| live |", "| legacy |") + "\n");
+    assert.ok(checkRepo(dir).errors.some((e) => /outside/.test(e)));
+    fs.writeFileSync(f, orig + "\n## Registro\n\n| rede | versão | features | status | wasm | contrato | nota |\n|---|---|---|---|---|---|---|\n" + row + "\n");
+    assert.ok(checkRepo(dir).errors.some((e) => /more than one/.test(e)));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
