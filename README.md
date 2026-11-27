@@ -22,3 +22,16 @@ O código-fonte não prova o estado implantado na rede. Confira IDs, hashes de W
 Cada crate é independente e deve ser compilado e testado dentro de `contracts/<nome>/`, com seu toolchain, lockfile e versão de `soroban-sdk`. A licença do repositório e de todos os crates é Apache-2.0, confirmada para esta publicação pelo responsável da Radox.
 
 A migração dos scripts de build e deploy do Core ainda está em andamento. **Não use este diretório para cerimônias de produção** sem validar a equivalência byte a byte dos artefatos, hashes e configurações de rede.
+
+## Deployments e caatinga
+
+A fonte do que está publicado em cada rede é [`deployments/registry.json`](deployments/README.md). O [caatinga](https://github.com/Dione-b/caatinga) (`@caatinga/cli` 3.9.2, pinado em `package.json`) é a ferramenta de consulta e de build testnet:
+
+```sh
+npm ci --ignore-scripts
+npx caatinga status --network testnet   # só leitura: o que está publicado, por contrato
+npx caatinga doctor --network testnet   # toolchain, config e artifacts
+npx caatinga build yield_distributor    # build testnet (--no-default-features --features testnet); 27/11: deu f6fbba00…, a entrada live v5
+```
+
+O `caatinga.artifacts.json` é gerado a partir do registry (`node scripts/gen-caatinga-artifacts.mjs`) e nunca se edita à mão; o `node scripts/check-registry.mjs` falha se ele divergir. O caatinga não faz deploy aqui, não escreve `.env` e nunca toca na mainnet (ver o topo do `caatinga.config.ts`).
