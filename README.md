@@ -31,7 +31,7 @@ A fonte do que está publicado em cada rede é [`deployments/registry.json`](dep
 npm ci --ignore-scripts
 npx caatinga status --network testnet   # só leitura: o que está publicado, por contrato
 npx caatinga doctor --network testnet   # toolchain, config e artifacts
-npx caatinga build yield_distributor    # build testnet (--no-default-features --features testnet)
+npx caatinga build yield_distributor    # build testnet (--no-default-features --features testnet); 27/11: deu f6fbba00…, a entrada live v5
 ```
 
 O `caatinga.artifacts.json` é gerado a partir do registry (`node scripts/gen-caatinga-artifacts.mjs`) e nunca se edita à mão; o `node scripts/check-registry.mjs` falha se ele divergir. O caatinga não faz deploy aqui, não escreve `.env` e nunca toca na mainnet (ver o topo do `caatinga.config.ts`).

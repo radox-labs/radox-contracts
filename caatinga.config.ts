@@ -15,8 +15,9 @@
 // WARNING BUILD FEATURES: default `cargo build` / `stellar contract build` with no
 //    flags produces a `testing`-feature WASM that skips the USDC SAC check —
 //    NEVER deploy that. caatinga passes `buildFeatures` verbatim to
-//    `stellar contract build`, so every contract with network features PINS the testnet flags.
-//    `caatinga build <contract>` can therefore never emit the footgun WASM.
+//    `stellar contract build`, so every contract with network features PINS the testnet flags:
+//    `caatinga build` of those four can therefore never emit the footgun WASM.
+//    transfer_agent keeps `[]` (crate defaults = `testing`, registry entry 5915649c…); custody_registry has no features.
 //    caatinga's build features are STATIC per contract (network only affects
 //    `generate`, not `build`). These are the TESTNET flags. MAINNET builds use
 //    `--features mainnet` and are done MANUALLY in the Ledger ceremony — NOT via

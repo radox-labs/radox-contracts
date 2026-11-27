@@ -99,6 +99,17 @@ test("deployedAt = first date in the source of the primary; every primary has on
   assert.equal(sourceDate("upload tx ab12 (2026-10-06); x 2026-11-01"), "2026-10-06T00:00:00.000Z");
   assert.equal(sourceDate("no date, tx 20261006aa and 12026-10-06"), UNKNOWN_DATE);
   assert.equal(sourceDate("bad 2026-13-45"), UNKNOWN_DATE);
+  assert.equal(sourceDate("docs/Operations/PROVA_F3_MANIFESTO_2026-11-20.md:59 (x)"), UNKNOWN_DATE);
+  assert.equal(sourceDate("(testnet, demo, deployed 2026-10-25); y"), "2026-10-25T00:00:00.000Z");
+  // every real source: the picked date is one written as a date in prose, never one inside a file name
+  let picked = 0;
+  for (const e of entries(real())) {
+    const d = sourceDate(e.source);
+    if (d === UNKNOWN_DATE) { assert.ok(!/[\s(]20\d\d-\d\d-\d\d[\s),;]/.test(e.source), e.source); continue; }
+    picked++;
+    assert.ok(new RegExp(`[\\s(]${d.slice(0, 10)}[\\s),;]`).test(e.source), e.source);
+  }
+  assert.equal(picked, 15); // the 6 PROVA_F3_MANIFESTO_2026-11-20.md entries (and the undated ones) get none
   for (const net of Object.values(generateArtifacts(real()).networks)) {
     for (const [crate, a] of Object.entries(net.contracts)) assert.notEqual(a.deployedAt, UNKNOWN_DATE, crate);
   }

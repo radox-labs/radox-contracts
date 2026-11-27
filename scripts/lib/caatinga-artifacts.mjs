@@ -14,9 +14,9 @@ export const UNKNOWN_DATE = "1970-01-01T00:00:00.000Z";
 export const sourcePath = (crate) => `./contracts/${crate}`;
 export const wasmPath = (crate) => `./contracts/${crate}/target/wasm32v1-none/release/${crate}.wasm`;
 
-/** First YYYY-MM-DD cited in `source`, as a datetime; UNKNOWN_DATE if none. */
+/** First standalone YYYY-MM-DD in `source` (after a space or "(", not inside a file name), as a datetime; UNKNOWN_DATE if none. */
 export function sourceDate(source) {
-  const m = /(?<!\d)(20\d\d-[01]\d-[0-3]\d)(?!\d)/.exec(source ?? "");
+  const m = /(?<=[\s(])(20\d\d-[01]\d-[0-3]\d)(?=[\s),;]|$)/.exec(source ?? "");
   return m && !Number.isNaN(Date.parse(m[1])) ? `${m[1]}T00:00:00.000Z` : UNKNOWN_DATE;
 }
 
