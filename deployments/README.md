@@ -23,6 +23,8 @@ O código-fonte não prova o que está implantado. Este registry também não pr
 - `features` = a feature de rede com que o wasm foi compilado (`--no-default-features --features <x>`). `null` junta dois casos: o crate não tem feature de rede, ou a fonte não registra os flags. O check recusa uma feature que o `Cargo.toml` do crate não declara, e na mainnet recusa `testnet` e `testing`.
 - `status`:
   - `live`: o wasm/instância corrente daquele crate naquela rede segundo a fonte (registrado, em uso ou aceito para instâncias novas).
+    Pode haver vários `live` por crate e rede. Exemplos: o token_sale testnet v10 (em uso no dev) e v11 (registrado), e as 4 instâncias do custody. Também pode não haver nenhum: o transfer_agent testnet só tem `legacy`, e a mainnet não tem transfer_agent nem recovery_policy (crate sem deploy numa rede = sem chave).
+    O token_sale v11 e o maturity_settlement v5 de testnet são `live` com dúvida na própria fonte. A linha diz «registrado», mas o mesmo texto diz que o env segue no anterior (radox-core DEPLOYMENTS.md:164 e :178/:185); o `source` marca `UNCERTAIN`.
   - `legacy`: está na rede, mas não é o corrente. Inclui versões substituídas, provas, ensaios e os wasm não reproduzíveis a partir da fonte, como o `transfer_agent` `3870748b…` (Rail `legacy: true`) e o yield `11887707…`. Uma instância `legacy` pode continuar rodando. Exemplo: o singleton do yield na testnet.
   - Na mainnet, o `uploaded` do `manifest.json` do Core (maturity_settlement v3 `0f07a598…`, código instalado e wasm corrente das ofertas) foi mapeado para `live`.
   - Os wasm `staged`/`superseded` do manifest nunca subiram à mainnet e não entram em `mainnet`. Existem na testnet como uploads do ensaio da F3 (`legacy`, `features: "mainnet"`).

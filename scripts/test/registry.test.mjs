@@ -24,9 +24,10 @@ test("the committed registry and docs pass", () => {
   assert.ok(summary.docs.includes("contracts/custody_registry/DEPLOYMENTS.md"));
 });
 
-test("the committed registry is stored with LF and parses", () => {
-  const raw = fs.readFileSync(REG_FILE, "utf8");
-  assert.doesNotThrow(() => JSON.parse(raw));
+test("the committed registry parses and every entry cites a source", () => {
+  const all = entries(JSON.parse(fs.readFileSync(REG_FILE, "utf8")));
+  assert.ok(all.length > 0);
+  for (const e of all) assert.match(e.source, /\S{8,}/, `${e.network}.${e.crate}[${e.index}]`);
 });
 
 // Each mutation must be refused, alone, on a registry that is otherwise valid.
