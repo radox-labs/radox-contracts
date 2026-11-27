@@ -1,0 +1,182 @@
+{
+  "version": 2,
+  "project": "radox",
+  "networks": {
+    "testnet": {
+      "contracts": {
+        "token_sale": {
+          "contractId": "PER-OFFER",
+          "wasmHash": "cda244f379ba2efc7690decb425089ec81117c1534e6e47c260f025e99c41b38",
+          "deployedAt": "2026-09-04T00:00:00.000Z",
+          "sourcePath": "./contracts/token_sale",
+          "wasmPath": "./contracts/token_sale/target/wasm32v1-none/release/token_sale.wasm",
+          "dependencies": [],
+          "resolvedDeployArgs": {},
+          "version": 10,
+          "features": "testnet",
+          "otherLive": [
+            {
+              "wasmHash": "8d5ae7c2369f6074b6492acb84895f8e223a0e3803c9464bad0af9b52ed9d0aa",
+              "contractId": null,
+              "version": 11,
+              "features": null
+            }
+          ]
+        },
+        "maturity_settlement": {
+          "contractId": "PER-OFFER",
+          "wasmHash": "45f7b6fd051d178500b98d5c9f5d293ffaa7bd4974319a6f4403906f67185975",
+          "deployedAt": "2026-10-06T00:00:00.000Z",
+          "sourcePath": "./contracts/maturity_settlement",
+          "wasmPath": "./contracts/maturity_settlement/target/wasm32v1-none/release/maturity_settlement.wasm",
+          "dependencies": [],
+          "resolvedDeployArgs": {},
+          "version": 5,
+          "features": null,
+          "otherLive": []
+        },
+        "yield_distributor": {
+          "contractId": "CBIDF7ZWOR2DZLPXKW553YOJP6FUWFSDG4UBYB25T7AIH2AQRZTSLXWC",
+          "wasmHash": "118877079046c04ab8ed491c4cd812284db00c13e67bc2fd9bac5552066500bd",
+          "deployedAt": "2026-10-06T00:00:00.000Z",
+          "sourcePath": "./contracts/yield_distributor",
+          "wasmPath": "./contracts/yield_distributor/target/wasm32v1-none/release/yield_distributor.wasm",
+          "dependencies": [],
+          "resolvedDeployArgs": {},
+          "version": 5,
+          "features": null,
+          "otherLive": [
+            {
+              "wasmHash": "f6fbba0082eebe0b888e1dd44585a30abe666ceaef987b194817d3c3e4c3f251",
+              "contractId": null,
+              "version": 5,
+              "features": "testnet"
+            },
+            {
+              "wasmHash": "ebb1ce41efcfb65b0f169f78f2e0132d3512124b9182b43a78de32508f1376ad",
+              "contractId": null,
+              "version": 4,
+              "features": "testnet"
+            }
+          ]
+        },
+        "recovery_policy": {
+          "contractId": "CAJKIIHP3R64TIIVCXZ2FDYSFUZFND3J6OYEQGL2HXDIHFURJ53O44C5",
+          "wasmHash": "6fed6f775bd49b97962c5e51d9b68411f5748e2dc5b322dc32accd5e202c8c25",
+          "deployedAt": "2026-09-24T00:00:00.000Z",
+          "sourcePath": "./contracts/recovery_policy",
+          "wasmPath": "./contracts/recovery_policy/target/wasm32v1-none/release/recovery_policy.wasm",
+          "dependencies": [],
+          "resolvedDeployArgs": {},
+          "version": 2,
+          "features": "testnet",
+          "otherLive": []
+        },
+        "transfer_agent": {
+          "contractId": "CAF4JIUZBLTQCSL2ZOX4ZEZ7FQDCGVBDVCBXRAJJRM6RW77BBX44SFC7",
+          "wasmHash": "3870748b709f7b8531c7ebbbc975712333f61949831350ff7192f7076fc6bff1",
+          "deployedAt": "2026-10-06T00:00:00.000Z",
+          "sourcePath": "./contracts/transfer_agent",
+          "wasmPath": "./contracts/transfer_agent/target/wasm32v1-none/release/transfer_agent.wasm",
+          "dependencies": [],
+          "resolvedDeployArgs": {},
+          "version": 5,
+          "features": null,
+          "otherLive": [
+            {
+              "wasmHash": "3870748b709f7b8531c7ebbbc975712333f61949831350ff7192f7076fc6bff1",
+              "contractId": "CAYD3EFTN6YOHMHJ5C62WYGABBIN2G6MV5MLHUKWV2EVJP5FFTKXSJWH",
+              "version": 5,
+              "features": null
+            }
+          ]
+        },
+        "custody_registry": {
+          "contractId": "CCBJVXMJYWPHTDJHDFPRGKPGXGEP24JOPJAMUS5C3BMZJTRTWR2H4LII",
+          "wasmHash": "8230ed937f443e40054d0806c9cdd044ef341db19f0c1b3123c573adb7a41342",
+          "deployedAt": "2026-10-25T00:00:00.000Z",
+          "sourcePath": "./contracts/custody_registry",
+          "wasmPath": "./contracts/custody_registry/target/wasm32v1-none/release/custody_registry.wasm",
+          "dependencies": [],
+          "resolvedDeployArgs": {},
+          "version": 1,
+          "features": null,
+          "otherLive": [
+            {
+              "wasmHash": "8230ed937f443e40054d0806c9cdd044ef341db19f0c1b3123c573adb7a41342",
+              "contractId": "CBTHLSQXQNEZ25UMVRP5TGOCPOTJXLFISJ2EF5NRNITAZPGMMW656ERX",
+              "version": 1,
+              "features": null
+            },
+            {
+              "wasmHash": "8230ed937f443e40054d0806c9cdd044ef341db19f0c1b3123c573adb7a41342",
+              "contractId": "CD7BUCY3DC7GTHRWFRBHNOFPMGVCHFDL4LHKXZNGEJISSGHI24KSNH3F",
+              "version": 1,
+              "features": null
+            },
+            {
+              "wasmHash": "8230ed937f443e40054d0806c9cdd044ef341db19f0c1b3123c573adb7a41342",
+              "contractId": "CDDWEENF6DKM4AHFWDBHQTYPLC3STMVFPXHXYDORLD53WDZM3FF3KJX4",
+              "version": 1,
+              "features": null
+            }
+          ]
+        }
+      },
+      "dependencyGraph": {}
+    },
+    "mainnet": {
+      "contracts": {
+        "token_sale": {
+          "contractId": "PER-OFFER",
+          "wasmHash": "524ede1c6122b15456329564878a191a00a7062e1a8c9009deaa44eeb5a59c57",
+          "deployedAt": "2026-06-01T00:00:00.000Z",
+          "sourcePath": "./contracts/token_sale",
+          "wasmPath": "./contracts/token_sale/target/wasm32v1-none/release/token_sale.wasm",
+          "dependencies": [],
+          "resolvedDeployArgs": {},
+          "version": 7,
+          "features": "mainnet",
+          "otherLive": []
+        },
+        "maturity_settlement": {
+          "contractId": "PER-OFFER",
+          "wasmHash": "0f07a598439581a0fc5990d4d1cbc4e2b7447109c505295ad9f7268790028cbf",
+          "deployedAt": "2026-06-01T00:00:00.000Z",
+          "sourcePath": "./contracts/maturity_settlement",
+          "wasmPath": "./contracts/maturity_settlement/target/wasm32v1-none/release/maturity_settlement.wasm",
+          "dependencies": [],
+          "resolvedDeployArgs": {},
+          "version": 3,
+          "features": "mainnet",
+          "otherLive": []
+        },
+        "yield_distributor": {
+          "contractId": "CDTXAGKIABYIKCRBD5CBEDYLVYZEEL5R5P4JT25AS4QHQFY2UGLTIMNX",
+          "wasmHash": "88509c72c0a82812b8f110b04bcd2dd3f734a43aa4b8bb18a28160ca9b9e4203",
+          "deployedAt": "2026-07-10T00:00:00.000Z",
+          "sourcePath": "./contracts/yield_distributor",
+          "wasmPath": "./contracts/yield_distributor/target/wasm32v1-none/release/yield_distributor.wasm",
+          "dependencies": [],
+          "resolvedDeployArgs": {},
+          "version": 4,
+          "features": "mainnet",
+          "otherLive": []
+        },
+        "custody_registry": {
+          "contractId": "CDV7YI7KYTDH4LPOLVUVRTFERJKYOWBBT6KS56ZX3V7EOGDBWS7LD4UP",
+          "wasmHash": "8230ed937f443e40054d0806c9cdd044ef341db19f0c1b3123c573adb7a41342",
+          "deployedAt": "2026-10-26T00:00:00.000Z",
+          "sourcePath": "./contracts/custody_registry",
+          "wasmPath": "./contracts/custody_registry/target/wasm32v1-none/release/custody_registry.wasm",
+          "dependencies": [],
+          "resolvedDeployArgs": {},
+          "version": 1,
+          "features": null,
+          "otherLive": []
+        }
+      },
+      "dependencyGraph": {}
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "radox-contracts",
+  "private": true,
+  "type": "module",
+  "description": "Soroban contracts of Radox: registry checks and caatinga (read-only status, testnet builds)",
+  "scripts": {
+    "test": "node --test scripts/test/*.test.mjs",
+    "check:registry": "node scripts/check-registry.mjs",
+    "gen:caatinga": "node scripts/gen-caatinga-artifacts.mjs"
+  },
+  "devDependencies": {
+    "@caatinga/cli": "3.9.2",
+    "@caatinga/core": "3.9.2"
+  },
+  "overrides": {
+    "@caatinga/zk": "3.9.2"
+  }
+}

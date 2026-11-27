@@ -2,6 +2,8 @@
 
 `registry.json` é a lista única de deployments por rede: o que está publicado onde (pedido do Pedro no radox-core#3, 27/11/2026). Os consumidores (Core, Rail) leem daqui. Os `DEPLOYMENTS.md` são a narrativa e o `node scripts/check-registry.mjs` confere-os contra este arquivo.
 
+O [caatinga](https://github.com/Dione-b/caatinga) (`npx caatinga status`, `doctor`, `build`) é a ferramenta de consulta e de build testnet; lê o `caatinga.artifacts.json` da raiz, que é **gerado** deste registry (ver «caatinga» abaixo). A fonte continua a ser o `registry.json`.
+
 O código-fonte não prova o que está implantado. Este registry também não prova: ele reúne o que as fontes registraram. Antes de operar, confirme o contract ID e o hash do wasm na rede (`stellar contract fetch --id … | sha256sum`).
 
 ## Formato (schema 1, contrato de interface)
@@ -48,7 +50,9 @@ O `scripts/deploy-testnet.sh` do PR #5 (`needs_network_feature`) usa `--features
 node scripts/check-registry.mjs                 # schema + Cargo.toml + âncoras de contracts/*/DEPLOYMENTS.md; exit 1 com a lista dos problemas
 node scripts/check-registry.mjs --core ../radox-core   # + live == listas aceitas do Core
 node scripts/caatinga.mjs query yield_distributor --network mainnet   # só leitura; --json para máquina
-RADOX_CORE_DIR=../radox-core node --test scripts/test/registry.test.mjs   # testes (sem o Core, 1 teste fica skip)
+node scripts/gen-caatinga-artifacts.mjs         # regenera caatinga.artifacts.json; --check só confere
+npm ci --ignore-scripts && npx caatinga status --network testnet   # vista do caatinga, só leitura
+RADOX_CORE_DIR=../radox-core npm test           # testes (sem o Core, 1 teste fica skip; os do caatinga pedem npm ci)
 ```
 
 O check confere:
@@ -59,15 +63,25 @@ O check confere:
    - as features têm de estar declaradas no `Cargo.toml` (na mainnet, nunca `testnet`/`testing`).
 2. **Âncora por crate.** Cada um dos 6 `contracts/<crate>/DEPLOYMENTS.md` tem uma secção `## Registro` com a tabela `| rede | versão | features | status | wasm | contrato | nota |`, uma linha por entrada. O registry e a tabela têm de ser iguais nos dois sentidos (rede, wasm, contrato, versão, features, status). Mudar um sem o outro, apagar ou acrescentar uma entrada, ou trocar um carácter num hash ou ID falha. Um crate sem âncora também falha.
 3. Que cada hash completo, hash abreviado (`8230ed93…1342`) e contract ID citado no resto do `DEPLOYMENTS.md` está no registry. Um hash de tx conta se estiver no `source` de uma entrada do crate. Sob um título `## testnet`/`## mainnet`, tem de estar nessa rede.
-4. Com `--core <checkout do radox-core>`: que o `live` do yield_distributor e do transfer_agent é igual às listas do Core.
+4. Que o `caatinga.artifacts.json` é igual ao gerado do registry (só depois de 1–3 passarem; `--artifacts <arquivo>` para outro caminho).
+5. Com `--core <checkout do radox-core>`: que o `live` do yield_distributor e do transfer_agent é igual às listas do Core.
 
 A âncora é uma segunda cópia de propósito. Os dados não ficam mais certos por isso (a origem de cada valor continua no `source`), mas um erro de edição num dos lados deixa de passar calado. A narrativa longa continua no `radox-core` `docs/Operations/DEPLOYMENTS.md`.
+
+## caatinga (`caatinga.config.ts` + `caatinga.artifacts.json`)
+
+- `caatinga.config.ts` veio do radox-core (PR radox-labs/radox-core#26, trazido do radox-internal), com os caminhos deste repo e o `custody_registry` acrescentado. `buildFeatures`: `--no-default-features --features testnet` no token_sale, maturity_settlement, yield_distributor e recovery_policy; `[]` no transfer_agent e no custody_registry. Um `caatinga build` nunca gera o wasm `testing` nem o de mainnet; o build mainnet continua manual, na cerimônia.
+- `caatinga.artifacts.json` (schema v2 do `@caatinga/core` 3.9.2) **não se edita à mão**: `node scripts/gen-caatinga-artifacts.mjs` regenera-o, e o `check-registry` falha se o arquivo não for byte a byte igual ao gerado (um carácter, uma entrada a mais ou a menos). Ao mudar o registry: editar `registry.json` + âncoras, regenerar, commitar os três.
+- Só entram as entradas `live`. O caatinga guarda uma entrada por contrato e rede; quando há várias `live`, a principal é **a primeira, na ordem do registry, com `contractId`, ou senão a primeira**. As outras vão para `otherLive` (campo extra, que o caatinga ignora). Hoje isso dá os singletons do Core (yield `CBIDF7ZW…`, transfer_agent `CAF4JIUZ…`) e o token_sale v10 `cda244f3…` (o `SALE_WASM_HASH` do dev). Ficam em `otherLive`: token_sale v11 `8d5ae7c2…`; yield `f6fbba00…` e `ebb1ce41…`; transfer_agent `CAYD3EFT…`; custody `CBTHLSQX…`, `CD7BUCY3…`, `CDDWEENF…`. A lista completa (com `legacy`) é a do `node scripts/caatinga.mjs query <crate>`.
+- Campos que o caatinga exige e o registry não tem: `contractId` `null` → `"PER-OFFER"` (token_sale e maturity_settlement, deploy por oferta, convenção do radox-core; noutro crate sem `contractId` o gerador falha); `deployedAt` = a primeira data `AAAA-MM-DD` do `source` da entrada principal (pode ser a do upload, não a do deploy), ou `1970-01-01T00:00:00.000Z` se não houver nenhuma (hoje todas têm). `version` e `features` ficam como campos extra (o `version` é o espelho `SALE_WASM_VERSION` do Core).
+- Nada de `caatinga deploy`, `upgrade`, `migrate` ou `sync-env`: reescrevem o artifacts e o check passa a falhar. O `caatinga inspect` já mentiu sobre o estado on-chain (radox-core, 13/08): confirmar com `stellar contract fetch --id … | sha256sum`.
+- `scripts/caatinga.mjs` (consulta do registry) é outro programa, anterior a esta restauração; o nome coincide.
 
 ## Pendente
 
 - **Cruzar com o radox-internal.** O Pedro tem 5 deployments de testnet e 3 de mainnet, com contractId e wasmHash. Esses dados ainda não entraram: falta o arquivo dele. Ao chegar: cada par entra (ou confirma uma entrada existente) com `source: "radox-internal <arquivo> …"`, e os `null` de `contractId`/`features`/`version` que ele resolver são preenchidos.
 - Sem hash nas fontes, logo fora do registry: token_sale v6 (testnet), maturity_settlement v1 (testnet), yield_distributor v2 pré-F-004 (testnet). Também ficam fora os hashes mainnet antigos `dd868e25…`/`3e54eb72…`, citados truncados como builds que não se reproduziram, e o yield v3 mainnet `d3f23a9f…`, que nunca subiu.
-- A CI ainda não roda o check (ver o PR que adicionou este arquivo).
+- A CI ainda não roda o check nem a suite node (`npm ci --ignore-scripts && npm test`): o `contracts.yml` só compila e testa os crates. Acrescentar o job é mudança de CI, à espera de decisão.
 
 ## Proposta: `deploy-testnet.sh` (PR #5) escrever e validar o registry
 
